@@ -6,6 +6,7 @@ const TELEGRAM_API = "https://api.telegram.org";
 const YANDEX_API = "https://ai.api.cloud.yandex.net/v1/chat/completions";
 const YANDEX_SEARCH_API = "https://searchapi.api.cloud.yandex.net/v2/gen/search";
 const WEBHOOK_URL = "https://anya-telegram-agent.vercel.app/api/telegram";
+const PUBLIC_APP_URL = "https://anya-telegram-agent.vercel.app";
 const HISTORY_LIMIT = 30;
 const HISTORY_TTL_SECONDS = 60 * 60 * 24 * 14;
 
@@ -61,6 +62,7 @@ const SYSTEM_PROMPT = [
   "Не называй данные «официальными», если среди фактически использованных источников нет соответствующего первоисточника.",
   "Если переданы прямые данные Банка России, используй именно их и явно различай официальный ежедневный курс ЦБ и рыночную или биржевую котировку. Не называй официальный курс ЦБ котировкой в реальном времени.",
   "Если переданы данные Open-Meteo, используй их как основной источник для текущей погоды и прогноза. Указывай температуру, ощущаемую температуру и ключевые условия по запросу Ани. В конце укажи Open-Meteo как источник погодных данных.",
+  "Если Аня просит проложить маршрут или открыть Навигатор, маршрут обрабатывается отдельной функцией. Не выдумывай адреса или координаты в обычном ответе.",
 ].join("\n");
 
 type ChatMessage = {
@@ -151,6 +153,176 @@ async function clearHistory(chatId: number) {
     console.error("Could not clear Redis history", error);
     return false;
   }
+}
+
+function isNavigationQuery(text: string) {
+  return /(пролож(?:и|ить)|маршрут|навигатор|как доехать|как добраться|поехали|ехать до|доехать до)/i.test(
+    text
+  );
+}
+
+async function extractNavigationDestination(userText: string) {
+  const apiKey = process.env.YANDEX_API_KEY;
+  const folderId = process.env.YANDEX_FOLDER_ID;
+
+  if (!apiKey || !folderId) {
+    throw new Error("Yandex credentials are missing for navigation");
+  }
+
+  const response = await fetch(YANDEX_API, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Api-Key ${apiKey}`,
+      "x-folder-id": folderId,
+    },
+    body: JSON.stringify({
+      model: `gpt://${folderId}/yandexgpt/latest`,
+      temperature: 0,
+      max_tokens: 120,
+      messages: [
+        {
+          role: "system",
+          content:
+            "Извлеки из запроса только точку назначения для автомобильного маршрута. Верни короткую поисковую фразу без пояснений. Если город не указан и это локальное место, организация, улица или адрес, добавь «Красноярск». Не добавляй Красноярск, если в запросе явно указан другой город или регион.",
+        },
+        {
+          role: "user",
+          content: userText,
+        },
+      ],
+    }),
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(
+      `Navigation destination extraction failed: ${response.status} ${JSON.stringify(data)}`
+    );
+  }
+
+  const destination =
+    data?.choices?.[0]?.message?.content ??
+    data?.result?.alternatives?.[0]?.message?.text;
+
+  if (!destination) {
+    throw new Error("Navigation destination is empty");
+  }
+
+  return String(destination).trim().replace(/^["'«]|["'»]$/g, "");
+}
+
+async function extractCoordinatesFromSearch(
+  destination: string,
+  searchContext: string
+) {
+  const apiKey = process.env.YANDEX_API_KEY;
+  const folderId = process.env.YANDEX_FOLDER_ID;
+
+  if (!apiKey || !folderId) {
+    throw new Error("Yandex credentials are missing for coordinate extraction");
+  }
+
+  const response = await fetch(YANDEX_API, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Api-Key ${apiKey}`,
+      "x-folder-id": folderId,
+    },
+    body: JSON.stringify({
+      model: `gpt://${folderId}/yandexgpt/latest`,
+      temperature: 0,
+      max_tokens: 120,
+      messages: [
+        {
+          role: "system",
+          content:
+            "По переданным результатам поиска найди координаты именно указанного места. Верни строго одну строку в формате LAT|LON|NAME, где LAT и LON только десятичные числа. Если надёжных координат нет, верни NOT_FOUND. Не придумывай координаты.",
+        },
+        {
+          role: "user",
+          content:
+            `Место: ${destination}\n\nРезультаты поиска:\n${searchContext}`,
+        },
+      ],
+    }),
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(
+      `Coordinate extraction failed: ${response.status} ${JSON.stringify(data)}`
+    );
+  }
+
+  const raw =
+    data?.choices?.[0]?.message?.content ??
+    data?.result?.alternatives?.[0]?.message?.text ??
+    "NOT_FOUND";
+
+  const line = String(raw).trim();
+  if (line === "NOT_FOUND") return null;
+
+  const match = line.match(
+    /^(-?\d{1,2}(?:\.\d+)?)\|(-?\d{1,3}(?:\.\d+)?)\|(.+)$/
+  );
+
+  if (!match) return null;
+
+  const lat = Number(match[1]);
+  const lon = Number(match[2]);
+  const name = match[3].trim();
+
+  if (
+    !Number.isFinite(lat) ||
+    !Number.isFinite(lon) ||
+    lat < -90 ||
+    lat > 90 ||
+    lon < -180 ||
+    lon > 180
+  ) {
+    return null;
+  }
+
+  return { lat, lon, name };
+}
+
+async function buildNavigatorRoute(userText: string) {
+  const destination = await extractNavigationDestination(userText);
+  const searchContext = await searchWeb(
+    `Найди точные координаты места: ${destination}. Нужны широта и долгота, проверь что место соответствует запросу.`
+  );
+  const coordinates = await extractCoordinatesFromSearch(
+    destination,
+    searchContext
+  );
+
+  if (!coordinates) {
+    const fallbackUrl =
+      `${PUBLIC_APP_URL}/api/navigate?q=${encodeURIComponent(destination)}`;
+
+    return {
+      text:
+        `Аня, точные координаты «${destination}» надёжно определить не получилось. Открою поиск этого места в Яндекс Навигаторе:\n${fallbackUrl}`,
+      historyText: `Предложил поиск в Яндекс Навигаторе для «${destination}».`,
+    };
+  }
+
+  const routeUrl =
+    `${PUBLIC_APP_URL}/api/navigate?lat=${encodeURIComponent(
+      coordinates.lat
+    )}&lon=${encodeURIComponent(coordinates.lon)}&name=${encodeURIComponent(
+      coordinates.name || destination
+    )}`;
+
+  return {
+    text:
+      `Аня, нашёл: ${coordinates.name || destination}.\nОткрыть маршрут в Яндекс Навигаторе:\n${routeUrl}\n\nСтартовая точка будет взята из текущего местоположения телефона.`,
+    historyText: `Построил ссылку Яндекс Навигатора до «${coordinates.name || destination}».`,
+  };
 }
 
 function normalizeWebQuery(text: string) {
@@ -654,6 +826,14 @@ export async function POST(request: Request) {
   try {
     await sendTelegramMessage(chatId, "Принял. Думаю...");
     const history = await loadHistory(chatId);
+
+    if (isNavigationQuery(text)) {
+      const navigation = await buildNavigatorRoute(text);
+      await sendTelegramMessage(chatId, navigation.text);
+      await saveExchange(chatId, text, navigation.historyText);
+      return Response.json({ ok: true });
+    }
+
     const webNeeded = shouldUseWebSearch(text);
     const queryText = normalizeWebQuery(text);
     const weatherNeeded = isWeatherQuery(queryText);
