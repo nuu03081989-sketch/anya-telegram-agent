@@ -198,7 +198,10 @@ async function fetchOfficialCbrRate(charCode: string) {
 
   const xml = await response.text();
   const dateMatch = xml.match(/<ValCurs[^>]*Date="([^"]+)"/i);
-  const blocks = xml.match(/<Valute[\\s\\S]*?<\\/Valute>/g) || [];
+  const blocks = xml
+    .split("<Valute")
+    .slice(1)
+    .map((part) => "<Valute" + part.split("</Valute>")[0] + "</Valute>");
   const block = blocks.find(
     (item) => readXmlTag(item, "CharCode").toUpperCase() === charCode
   );
