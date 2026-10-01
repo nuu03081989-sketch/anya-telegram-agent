@@ -26,6 +26,38 @@ async function getRedis() {
   return redisClient;
 }
 
+
+function krasnoyarskDateKey() {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Krasnoyarsk",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+}
+
+function dailyPhrase(dateKey: string) {
+  const phrases = [
+    "Сильная операционка начинается там, где перестают надеяться, что само рассосётся.",
+    "Деньги любят скорость, но ещё сильнее они любят контроль.",
+    "Если проблема повторилась трижды, это уже не случайность, а процесс.",
+    "Хороший план экономит время. Хорошая дисциплина экономит ещё и деньги.",
+    "Не всякая срочность важна. Но всякая важная вещь должна иметь срок.",
+    "Бизнес растёт быстрее, когда цифры спорят вместо людей.",
+    "Сначала считаем последствия, потом нажимаем красивую кнопку.",
+    "Запас прочности выглядит скучно ровно до первого кризиса.",
+    "Управление начинается с вопроса: кто, что и к какому сроку.",
+    "Самая дорогая ошибка часто начинается со слов: да ладно, разберёмся потом.",
+    "Не нужно контролировать всё. Нужно контролировать то, что двигает деньги и сроки.",
+    "Хороший день начинается не с мотивации, а с ясных приоритетов.",
+    "Если узкое место известно и ничего не меняется, это уже управленческое решение.",
+    "Иногда лучший способ ускориться - убрать лишнее, а не добавить ещё одну задачу.",
+  ];
+
+  const numeric = Number(dateKey.replace(/-/g, ""));
+  return phrases[Math.abs(numeric) % phrases.length];
+}
+
 function cleanTelegramText(text: string) {
   return text
     .replace(/\*\*/g, "")
@@ -104,27 +136,24 @@ async function searchWeb(queryText: string) {
 }
 
 async function searchMany(queries: string[], maxChars = 7000) {
-  const results = await Promise.allSettled(queries.map((query) => searchWeb(query)));
+  const successful: string[] = [];
 
-  const successful = results
-    .flatMap((result, index) => {
-      if (result.status === "fulfilled" && result.value) {
-        return [`Запрос ${index + 1}:\n${result.value.slice(0, 3200)}`];
+  for (let index = 0; index < queries.length; index += 1) {
+    try {
+      const value = await searchWeb(queries[index]);
+      if (value) {
+        successful.push(`Запрос ${index + 1}:\n${value.slice(0, 3200)}`);
       }
+    } catch (error) {
+      console.error(`Morning brief search query ${index + 1} failed`, error);
+    }
+  }
 
-      if (result.status === "rejected") {
-        console.error(`Morning brief search query ${index + 1} failed`, result.reason);
-      }
-
-      return [];
-    })
-    .join("\n\n");
-
-  if (!successful) {
+  if (successful.length === 0) {
     throw new Error("All searches for morning brief section failed");
   }
 
-  return successful.slice(0, maxChars);
+  return successful.join("\n\n").slice(0, maxChars);
 }
 
 function readXmlTag(block: string, tag: string) {
@@ -246,9 +275,9 @@ async function askYandexForBrief(context: string, previousBrief: string) {
             "Не заполняй отчёт шумом. Если по разделу существенных изменений нет, так и напиши. Но сначала используй все переданные поисковые результаты этого раздела, а не делай вывод по одному источнику.",
             "Различай вступившие в силу нормы, подписанные решения, проекты и обсуждения. Не называй проект действующим законом.",
             "Для важных утверждений указывай короткую ссылку на источник из переданного контекста. Для налогов, кадров, законов и государственных решений опирайся прежде всего на ФНС, Роструд, Правительство РФ, Минфин, Минпромторг, Минстрой, Банк России и официальное опубликование правовых актов. Вторичный источник не используй как подтверждение того, что закон принят или вступил в силу.",
-            "Структура: 1) Погода и логистика. 2) Топливо. 3) Курсы. 4) Рынок стройматериалов и конкуренты. 5) Спрос: стройка, ипотека, ремонт. 6) Налоги, кадры и законодательство. 7) Крупные государственные решения, влияющие на бизнес. 8) Что изменилось со вчера. 9) Саня считает важным сегодня: 2-3 конкретных пункта. 10) Фраза дня.",
-            "Фразу дня придумай сам специально для Ани: короткую, живую, деловую или слегка ироничную. Не используй чужие цитаты, кавычки и не приписывай фразу известным людям.",
-            "Пиши по-русски, без эмодзи, без длинного тире и без markdown-разметки. Заголовки пиши обычным текстом. Отделяй факт от своего вывода. Если свежих данных реально нет, так и скажи.",
+            "Структура: 1) Погода и логистика. 2) Топливо. 3) Курсы. 4) Рынок стройматериалов и конкуренты. 5) Спрос: стройка, ипотека, ремонт. 6) Налоги, кадры и законодательство. 7) Крупные государственные решения, влияющие на бизнес. 8) Что изменилось со вчера. 9) Саня считает важным сегодня: 2-3 конкретных пункта.",
+            "Не добавляй раздел «Фраза дня»: он будет добавлен программно после твоего ответа.",
+            "Пиши по-русски, без эмодзи, без длинного тире и без markdown-разметки. Заголовки пиши обычным текстом. Отделяй факт от своего вывода. Если свежих данных реально нет, так и скажи. Предыдущий бриф разрешено использовать только для сравнения в разделе «Что изменилось со вчера». Никогда не используй его как источник текущих фактов, ссылок, законов или новостей и не переноси из него сведения, которых нет в свежих данных.",
           ].join("\n"),
         },
         {
@@ -277,7 +306,26 @@ async function askYandexForBrief(context: string, previousBrief: string) {
 
 async function buildMorningBrief() {
   const redis = await getRedis();
-  const previousBrief = (await redis.get(MORNING_BRIEF_LAST_KEY)) || "";
+  const todayKey = krasnoyarskDateKey();
+  const storedPrevious = (await redis.get(MORNING_BRIEF_LAST_KEY)) || "";
+  let previousBrief = "";
+
+  try {
+    const parsed = JSON.parse(storedPrevious) as {
+      date?: string;
+      brief?: string;
+    };
+
+    if (
+      parsed?.date &&
+      parsed.date !== todayKey &&
+      typeof parsed.brief === "string"
+    ) {
+      previousBrief = parsed.brief;
+    }
+  } catch {
+    // Old plain-text value from the first version is intentionally ignored.
+  }
 
   const results = await Promise.allSettled([
     fetchKrasnoyarskWeather(),
@@ -336,9 +384,25 @@ async function buildMorningBrief() {
     })
     .join("\n\n");
 
-  const brief = await askYandexForBrief(context.slice(0, 43000), previousBrief.slice(0, 3500));
-  await redis.set(MORNING_BRIEF_LAST_KEY, brief, { EX: 60 * 60 * 24 * 7 });
-  return brief;
+  const coreBrief = await askYandexForBrief(
+    context.slice(0, 43000),
+    previousBrief.slice(0, 3500)
+  );
+
+  const brief = [
+    coreBrief.trim(),
+    "",
+    "Фраза дня",
+    dailyPhrase(todayKey),
+  ].join("\n");
+
+  await redis.set(
+    MORNING_BRIEF_LAST_KEY,
+    JSON.stringify({ date: todayKey, brief }),
+    { EX: 60 * 60 * 24 * 7 }
+  );
+
+  return brief.slice(0, 4090);
 }
 
 export async function GET() {
