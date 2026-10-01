@@ -306,7 +306,9 @@ async function buildNavigatorRoute(userText: string) {
 
     return {
       text:
-        `Аня, точные координаты «${destination}» надёжно определить не получилось. Открою поиск этого места в Яндекс Навигаторе:\n${fallbackUrl}`,
+        `Аня, точные координаты «${destination}» надёжно определить не получилось. Открою поиск этого места в Яндекс Навигаторе.`,
+      buttonUrl: fallbackUrl,
+      buttonText: "Открыть в Яндекс Навигаторе",
       historyText: `Предложил поиск в Яндекс Навигаторе для «${destination}».`,
     };
   }
@@ -320,7 +322,9 @@ async function buildNavigatorRoute(userText: string) {
 
   return {
     text:
-      `Аня, нашёл: ${coordinates.name || destination}.\nОткрыть маршрут в Яндекс Навигаторе:\n${routeUrl}\n\nСтартовая точка будет взята из текущего местоположения телефона.`,
+      `Аня, нашёл: ${coordinates.name || destination}.\nСтартовая точка будет взята из текущего местоположения телефона.`,
+    buttonUrl: routeUrl,
+    buttonText: "Открыть в Яндекс Навигаторе",
     historyText: `Построил ссылку Яндекс Навигатора до «${coordinates.name || destination}».`,
   };
 }
@@ -653,7 +657,11 @@ function cleanTelegramText(text: string) {
     .trim();
 }
 
-async function sendTelegramMessage(chatId: number, text: string) {
+async function sendTelegramMessage(
+  chatId: number,
+  text: string,
+  options?: { buttonUrl?: string; buttonText?: string }
+) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (!token) throw new Error("TELEGRAM_BOT_TOKEN is missing");
 
@@ -664,6 +672,20 @@ async function sendTelegramMessage(chatId: number, text: string) {
       chat_id: chatId,
       text: cleanTelegramText(text),
       disable_web_page_preview: true,
+      ...(options?.buttonUrl
+        ? {
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  {
+                    text: options.buttonText || "Открыть",
+                    url: options.buttonUrl,
+                  },
+                ],
+              ],
+            },
+          }
+        : {}),
     }),
   });
 
@@ -829,7 +851,10 @@ export async function POST(request: Request) {
 
     if (isNavigationQuery(text)) {
       const navigation = await buildNavigatorRoute(text);
-      await sendTelegramMessage(chatId, navigation.text);
+      await sendTelegramMessage(chatId, navigation.text, {
+        buttonUrl: navigation.buttonUrl,
+        buttonText: navigation.buttonText,
+      });
       await saveExchange(chatId, text, navigation.historyText);
       return Response.json({ ok: true });
     }
