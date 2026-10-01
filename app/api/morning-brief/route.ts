@@ -326,6 +326,134 @@ function validateSearchSection(label: string, value: string) {
   return value;
 }
 
+function extractUrls(text: string) {
+  return text.match(/https?:\/\/[^\s)]+/g) || [];
+}
+
+function urlMatchesAnyDomain(url: string, domains: string[]) {
+  try {
+    const host = new URL(url.replace(/[.,;]+$/, "")).hostname.toLowerCase();
+    return domains.some(
+      (domain) => host === domain || host.endsWith(`.${domain}`)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function replaceSectionBody(
+  text: string,
+  heading: string,
+  nextHeading: string,
+  replacement: string
+) {
+  const start = text.indexOf(heading);
+  if (start < 0) return text;
+
+  const bodyStart = start + heading.length;
+  const end = text.indexOf(nextHeading, bodyStart);
+  if (end < 0) return text;
+
+  return (
+    text.slice(0, bodyStart) +
+    "\n\n" +
+    replacement.trim() +
+    "\n\n" +
+    text.slice(end)
+  );
+}
+
+function getSectionBody(text: string, heading: string, nextHeading: string) {
+  const start = text.indexOf(heading);
+  if (start < 0) return "";
+
+  const bodyStart = start + heading.length;
+  const end = text.indexOf(nextHeading, bodyStart);
+  if (end < 0) return text.slice(bodyStart).trim();
+
+  return text.slice(bodyStart, end).trim();
+}
+
+function enforceFinalSourcePolicy(text: string) {
+  const noData =
+    "Подтверждённых свежих данных по этому блоку из подходящих источников не найдено.";
+
+  const rules = [
+    {
+      heading: "Топливо",
+      next: "Курсы",
+      domains: [
+        "government.ru",
+        "rosstat.gov.ru",
+        "spimex.com",
+        "minenergo.gov.ru",
+        "fas.gov.ru",
+        "rzd.ru",
+      ],
+    },
+    {
+      heading: "Спрос: стройка, ипотека, ремонт",
+      next: "Налоги, кадры и законодательство",
+      domains: ["cbr.ru", "minstroyrf.gov.ru", "rosstat.gov.ru", "government.ru"],
+    },
+    {
+      heading: "Налоги, кадры и законодательство",
+      next: "Крупные государственные решения, влияющие на бизнес",
+      domains: [
+        "nalog.gov.ru",
+        "rostrud.gov.ru",
+        "publication.pravo.gov.ru",
+        "government.ru",
+      ],
+    },
+    {
+      heading: "Крупные государственные решения, влияющие на бизнес",
+      next: "Что изменилось со вчера",
+      domains: [
+        "government.ru",
+        "minfin.gov.ru",
+        "minpromtorg.gov.ru",
+        "publication.pravo.gov.ru",
+        "minstroyrf.gov.ru",
+      ],
+    },
+  ];
+
+  let result = text;
+
+  for (const rule of rules) {
+    const body = getSectionBody(result, rule.heading, rule.next);
+    const urls = extractUrls(body);
+    const hasAllowedSource = urls.some((url) =>
+      urlMatchesAnyDomain(url, rule.domains)
+    );
+
+    if (!hasAllowedSource) {
+      result = replaceSectionBody(result, rule.heading, rule.next, noData);
+    }
+  }
+
+  const marketBody = getSectionBody(
+    result,
+    "Рынок стройматериалов и конкуренты",
+    "Спрос: стройка, ипотека, ремонт"
+  );
+
+  if (
+    marketBody &&
+    (extractUrls(marketBody).length === 0 || !hasMarketEventSignal(marketBody))
+  ) {
+    result = replaceSectionBody(
+      result,
+      "Рынок стройматериалов и конкуренты",
+      "Спрос: стройка, ипотека, ремонт",
+      "Подтверждённых свежих событий по конкурентам и рынку за выбранный период не найдено."
+    );
+  }
+
+  return result;
+}
+
 async function askYandexForBrief(context: string, previousBrief: string) {
   const apiKey = process.env.YANDEX_API_KEY;
   const folderId = process.env.YANDEX_FOLDER_ID;
@@ -349,19 +477,19 @@ async function askYandexForBrief(context: string, previousBrief: string) {
     body: JSON.stringify({
       model: `gpt://${folderId}/yandexgpt/latest`,
       temperature: 0.35,
-      max_tokens: 1600,
+      max_tokens: 1200,
       messages: [
         {
           role: "system",
           content: [
             "Ты Саня, персональный ИИ-ассистент Ани, операционного директора компании в Красноярске.",
             "Компания продаёт строительные материалы в среднем и среднем+ сегменте: сантехника, отопление, отделочные материалы, напольные покрытия, плитка, керамогранит и смежные категории.",
-            "Сделай короткий утренний управленческий бриф на 4-6 минут чтения.",
+            "Сделай плотный утренний управленческий бриф примерно на 3-4 минуты чтения и не более 3300 знаков до блока «Фраза дня».",
             "Фокус: деньги, продажи, спрос, логистика, топливо, поставщики, конкуренты, налоги, кадровый учёт, крупные законы и государственные решения, способные повлиять на бизнес.",
             "Политические события описывай нейтрально и только через документированные решения и возможные экономические последствия. Не давай политических оценок и рекомендаций.",
             "Не заполняй отчёт шумом. Если по разделу существенных изменений нет, так и напиши. Не перечисляй просто существующие магазины или компании: для блока конкурентов нужны только новые действия или изменения. Старые топливные кризисы упоминай только если в свежих данных есть новое развитие.",
             "Различай вступившие в силу нормы, подписанные решения, проекты и обсуждения. Не называй проект действующим законом.",
-            "Для каждого непустого блока «Топливо», «Рынок стройматериалов и конкуренты», «Спрос: стройка, ипотека, ремонт», «Налоги, кадры и законодательство» и «Крупные государственные решения, влияющие на бизнес» обязательно укажи хотя бы один URL источника именно из переданного контекста. Если подходящего URL нет, напиши, что подтверждённых свежих данных нет, и не делай предположений.",
+            "Для каждого непустого блока «Топливо», «Рынок стройматериалов и конкуренты», «Спрос: стройка, ипотека, ремонт», «Налоги, кадры и законодательство» и «Крупные государственные решения, влияющие на бизнес» обязательно укажи хотя бы один URL источника именно из переданного контекста. Для законов, налогов, государственных решений, официальной статистики и топливных ограничений используй только первоисточники. Если первоисточника нет, напиши, что подтверждённых свежих данных нет.",
             "Используй точные заголовки и именно в таком порядке: Погода и логистика; Топливо; Курсы; Рынок стройматериалов и конкуренты; Спрос: стройка, ипотека, ремонт; Налоги, кадры и законодательство; Крупные государственные решения, влияющие на бизнес; Что изменилось со вчера; Саня считает важным сегодня.",
             "Не добавляй раздел «Фраза дня»: он будет добавлен программно после твоего ответа.",
             "Пиши по-русски, без эмодзи, без длинного тире и без markdown-разметки. Заголовки пиши обычным текстом. Отделяй факт от своего вывода. Нельзя писать, что закон, программа, ставка или правило изменились или вступили в силу, если в соответствующем свежем блоке нет официального источника. Предыдущий бриф разрешено использовать только для сравнения в разделе «Что изменилось со вчера». Никогда не используй его как источник текущих фактов, ссылок, законов или новостей и не переноси из него сведения, которых нет в свежих данных.",
@@ -419,7 +547,8 @@ async function buildMorningBrief() {
     fetchCbrRates(),
 
     searchMany([
-      "Россия и Красноярский край: только значимые изменения за последние 3 дня по бензину, дизелю, НПЗ, дефициту топлива, биржевым ценам СПбМТСБ, грузовой и железнодорожной логистике. Не пересказывай старые кризисы без нового события.",
+      "site:government.ru OR site:minenergo.gov.ru OR site:fas.gov.ru топливо бензин дизель экспорт ограничения дефицит последние 7 дней",
+      "site:rosstat.gov.ru OR site:spimex.com бензин дизель цены нефтепродукты последние данные",
     ]),
 
     searchMany([
@@ -427,15 +556,18 @@ async function buildMorningBrief() {
     ]),
 
     searchMany([
-      "Россия: значимые изменения последних 7 дней по жилищному строительству, вводу жилья, ипотеке, ключевой ставке, застройщикам и спросу на ремонт. Приоритет Банк России, Минстрой и официальная статистика. Объясни влияние на спрос на стройматериалы.",
+      "site:cbr.ru ипотека жилищное кредитование ключевая ставка последние данные 2026",
+      "site:minstroyrf.gov.ru OR site:rosstat.gov.ru строительство жилье ввод жилья последние данные 2026",
     ]),
 
     searchMany([
-      "Россия: новые за последние 14 дней официальные изменения для работодателей и торговли по налогам, НДС, прибыли, УСН, взносам, кассам, маркировке, кадровому учету и трудовому праву. Приоритет ФНС, Роструд и publication.pravo.gov.ru. Отличай закон от проекта.",
+      "site:nalog.gov.ru с 1 октября 2026 изменения НДС налоги работодатели торговля последние публикации",
+      "site:rostrud.gov.ru OR site:publication.pravo.gov.ru с 1 октября 2026 кадровый учет трудовое законодательство работодатели изменения",
     ]),
 
     searchMany([
-      "Россия: только новые за последние 14 дней официальные решения правительства и федеральные нормы, влияющие на торговлю стройматериалами, импорт, пошлины, маркировку, логистику и строительство. Приоритет government.ru, Минфин, Минпромторг и publication.pravo.gov.ru. Не используй обзорные статьи как подтверждение принятия.",
+      "site:government.ru OR site:minpromtorg.gov.ru торговля импорт маркировка логистика строительные материалы решения последние 14 дней",
+      "site:minfin.gov.ru OR site:publication.pravo.gov.ru пошлины налоги торговля строительство решения последние 14 дней",
     ]),
   ]);
 
@@ -463,10 +595,12 @@ async function buildMorningBrief() {
     })
     .join("\n\n");
 
-  const coreBrief = await askYandexForBrief(
+  const generatedBrief = await askYandexForBrief(
     context.slice(0, 43000),
     previousBrief.slice(0, 3500)
   );
+
+  const coreBrief = enforceFinalSourcePolicy(generatedBrief);
 
   const brief = [
     coreBrief.trim(),
@@ -481,7 +615,7 @@ async function buildMorningBrief() {
     { EX: 60 * 60 * 24 * 7 }
   );
 
-  return brief.slice(0, 4090);
+  return brief.slice(0, 3900);
 }
 
 export async function GET() {
