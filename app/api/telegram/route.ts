@@ -144,6 +144,37 @@ async function saveExchange(
   }
 }
 
+const MORNING_BRIEF_CHAT_KEY = "telegram:morning-brief:chat-id";
+
+async function enableMorningBrief(chatId: number) {
+  const redis = await getRedis();
+  await redis.set(MORNING_BRIEF_CHAT_KEY, String(chatId));
+}
+
+async function disableMorningBrief() {
+  const redis = await getRedis();
+  await redis.del(MORNING_BRIEF_CHAT_KEY);
+}
+
+async function triggerMorningBriefNow() {
+  const secret = process.env.MORNING_BRIEF_SECRET;
+  if (!secret) throw new Error("MORNING_BRIEF_SECRET is missing");
+
+  const response = await fetch(`${PUBLIC_APP_URL}/api/morning-brief`, {
+    method: "POST",
+    headers: {
+      "x-brief-secret": secret,
+    },
+  });
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(
+      `Morning brief trigger failed: ${response.status} ${body.slice(0, 500)}`
+    );
+  }
+}
+
 async function clearHistory(chatId: number) {
   try {
     const redis = await getRedis();
@@ -842,6 +873,51 @@ export async function POST(request: Request) {
         ? "Аня, историю этого Telegram-чата очистил."
         : "Аня, не смог очистить историю. Попробуй ещё раз чуть позже."
     );
+    return Response.json({ ok: true });
+  }
+
+  if (text === "/brief-on") {
+    try {
+      await enableMorningBrief(chatId);
+      await sendTelegramMessage(
+        chatId,
+        "Аня, этот чат назначил для утреннего брифа. Следующий шаг - подключить расписание на 10:00 по Красноярску."
+      );
+    } catch (error) {
+      console.error("Could not enable morning brief", error);
+      await sendTelegramMessage(
+        chatId,
+        "Аня, не смог включить утренний бриф. Попробуй ещё раз чуть позже."
+      );
+    }
+    return Response.json({ ok: true });
+  }
+
+  if (text === "/brief-off") {
+    try {
+      await disableMorningBrief();
+      await sendTelegramMessage(chatId, "Аня, ежедневный утренний бриф отключил.");
+    } catch (error) {
+      console.error("Could not disable morning brief", error);
+      await sendTelegramMessage(
+        chatId,
+        "Аня, не смог отключить утренний бриф. Попробуй ещё раз чуть позже."
+      );
+    }
+    return Response.json({ ok: true });
+  }
+
+  if (text === "/brief-now") {
+    try {
+      await sendTelegramMessage(chatId, "Принял. Собираю утренний бриф...");
+      await triggerMorningBriefNow();
+    } catch (error) {
+      console.error("Could not trigger morning brief", error);
+      await sendTelegramMessage(
+        chatId,
+        "Аня, тестовый бриф пока не запустился. Проверь настройку MORNING_BRIEF_SECRET."
+      );
+    }
     return Response.json({ ok: true });
   }
 
