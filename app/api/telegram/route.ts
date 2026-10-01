@@ -59,6 +59,7 @@ const SYSTEM_PROMPT = [
   "Для важных актуальных данных сначала предпочитай первоисточники: официальные сайты госорганов, регуляторов, бирж, компаний, авиакомпаний, отелей, банков, сервисов и других владельцев данных. Вторичные СМИ и агрегаторы используй как дополнение, а не как замену первоисточнику, если официальный источник доступен.",
   "Для курсов валют и данных Банка России в первую очередь ищи официальный источник cbr.ru. Для законов и нормативных актов предпочитай официальные государственные публикации. Для расписаний и тарифов предпочитай официальный сайт или приложение соответствующего перевозчика или сервиса.",
   "Не называй данные «официальными», если среди фактически использованных источников нет соответствующего первоисточника.",
+  "Если переданы прямые данные Банка России, используй именно их и явно различай официальный ежедневный курс ЦБ и рыночную или биржевую котировку. Не называй официальный курс ЦБ котировкой в реальном времени.",
 ].join("\n");
 
 type ChatMessage = {
@@ -163,6 +164,69 @@ function shouldUseWebSearch(text: string) {
   return /(в интернете|в сети|поищи|найди|посмотри.*(?:интернет|сеть)|проверь.*(?:интернет|сеть)|сегодня|сейчас|текущ|актуальн|последн|новост|погода|прогноз|курс(?:ы| валют)?|котиров|цена|стоимость|расписан|результат матча|сч[её]т матча|наличи|отзывы|рейтинг|кто сейчас|работает ли|открыт ли|режим работы|контакт)/i.test(
     normalized
   );
+}
+
+const CBR_DAILY_URL = "https://www.cbr.ru/scripts/XML_daily.asp";
+
+function detectCbrCurrencyCode(text: string) {
+  const normalized = text.toLowerCase();
+
+  if (!/курс/.test(normalized) || /котиров/.test(normalized)) return null;
+
+  if (/(доллар|usd)/i.test(normalized)) return "USD";
+  if (/(евро|eur)/i.test(normalized)) return "EUR";
+  if (/(юан|cny)/i.test(normalized)) return "CNY";
+
+  return null;
+}
+
+function readXmlTag(block: string, tag: string) {
+  const match = block.match(new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`));
+  return match?.[1]?.trim() || "";
+}
+
+async function fetchOfficialCbrRate(charCode: string) {
+  const response = await fetch(CBR_DAILY_URL, {
+    headers: {
+      "User-Agent": "anya-telegram-agent/1.0",
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`CBR daily rates failed: ${response.status}`);
+  }
+
+  const xml = await response.text();
+  const dateMatch = xml.match(/<ValCurs[^>]*Date="([^"]+)"/i);
+  const blocks = xml.match(/<Valute[\\s\\S]*?<\\/Valute>/g) || [];
+  const block = blocks.find(
+    (item) => readXmlTag(item, "CharCode").toUpperCase() === charCode
+  );
+
+  if (!block) {
+    throw new Error(`CBR rate not found for ${charCode}`);
+  }
+
+  const nominal = Number(readXmlTag(block, "Nominal") || "1");
+  const valueRaw = readXmlTag(block, "Value");
+  const name = readXmlTag(block, "Name") || charCode;
+  const value = Number(valueRaw.replace(",", "."));
+
+  if (!Number.isFinite(value) || !Number.isFinite(nominal) || nominal <= 0) {
+    throw new Error(`CBR returned invalid rate for ${charCode}`);
+  }
+
+  const perUnit = value / nominal;
+  const date = dateMatch?.[1] || "не указана";
+
+  return [
+    "Официальные данные Банка России.",
+    `Валюта: ${name} (${charCode}).`,
+    `Курс: ${perUnit.toFixed(4).replace(".", ",")} руб. за 1 ${charCode}.`,
+    `Дата курса: ${date}.`,
+    "Важно: это официальный ежедневный курс Банка России, а не биржевая котировка в реальном времени.",
+    `Источник: ${CBR_DAILY_URL}`,
+  ].join("\n");
 }
 
 async function searchWeb(queryText: string) {
@@ -416,10 +480,26 @@ export async function POST(request: Request) {
     const history = await loadHistory(chatId);
     const webNeeded = shouldUseWebSearch(text);
     const queryText = normalizeWebQuery(text);
+    const cbrCurrencyCode = detectCbrCurrencyCode(queryText);
     let webContext: string | undefined;
     let webSearchFailed = false;
 
-    if (webNeeded) {
+    if (cbrCurrencyCode) {
+      try {
+        webContext = await fetchOfficialCbrRate(cbrCurrencyCode);
+      } catch (error) {
+        console.error("CBR official rate failed", error);
+
+        try {
+          webContext = await searchWeb(
+            `Официальный курс Банка России ${cbrCurrencyCode} к рублю site:cbr.ru`
+          );
+        } catch (searchError) {
+          webSearchFailed = true;
+          console.error("CBR fallback web search failed", searchError);
+        }
+      }
+    } else if (webNeeded) {
       try {
         webContext = await searchWeb(queryText);
       } catch (error) {
