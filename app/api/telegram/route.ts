@@ -2,6 +2,7 @@ export const runtime = "nodejs";
 
 const TELEGRAM_API = "https://api.telegram.org";
 const YANDEX_API = "https://ai.api.cloud.yandex.net/v1/chat/completions";
+const WEBHOOK_URL = "https://anya-telegram-agent.vercel.app/api/telegram";
 
 type TelegramUpdate = {
   message?: {
@@ -26,6 +27,31 @@ async function sendTelegramMessage(chatId: number, text: string) {
 
   if (!response.ok) {
     throw new Error(`Telegram sendMessage failed: ${response.status}`);
+  }
+}
+
+async function configureWebhookSecret() {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const secret = process.env.TELEGRAM_WEBHOOK_SECRET;
+
+  if (!token) throw new Error("TELEGRAM_BOT_TOKEN is missing");
+  if (!secret) throw new Error("TELEGRAM_WEBHOOK_SECRET is missing");
+
+  const response = await fetch(`${TELEGRAM_API}/bot${token}/setWebhook`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      url: WEBHOOK_URL,
+      secret_token: secret,
+    }),
+  });
+
+  const data = await response.json();
+
+  if (!response.ok || data?.ok !== true) {
+    throw new Error(
+      `Telegram setWebhook failed: ${response.status} ${JSON.stringify(data)}`
+    );
   }
 }
 
@@ -80,6 +106,31 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
+  const expectedSecret = process.env.TELEGRAM_WEBHOOK_SECRET;
+
+  if (!expectedSecret) {
+    console.error("TELEGRAM_WEBHOOK_SECRET is missing");
+    return Response.json({ ok: false }, { status: 500 });
+  }
+
+  const receivedSecret = request.headers.get(
+    "x-telegram-bot-api-secret-token"
+  );
+
+  if (receivedSecret !== expectedSecret) {
+    if (!receivedSecret) {
+      try {
+        await configureWebhookSecret();
+        return Response.json({ ok: true, webhook_protected: true });
+      } catch (error) {
+        console.error(error);
+        return Response.json({ ok: false }, { status: 500 });
+      }
+    }
+
+    return Response.json({ ok: false }, { status: 401 });
+  }
+
   let update: TelegramUpdate;
 
   try {
