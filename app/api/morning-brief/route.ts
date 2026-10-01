@@ -10,6 +10,7 @@ const OPEN_METEO_GEOCODING = "https://geocoding-api.open-meteo.com/v1/search";
 const OPEN_METEO_FORECAST = "https://api.open-meteo.com/v1/forecast";
 const MORNING_BRIEF_CHAT_KEY = "telegram:morning-brief:chat-id";
 const MORNING_BRIEF_LAST_KEY = "telegram:morning-brief:last";
+const MORNING_BRIEF_RUNNING_KEY = "telegram:morning-brief:running";
 
 let redisClient: ReturnType<typeof createClient> | null = null;
 
@@ -500,8 +501,23 @@ export async function POST(request: Request) {
     return Response.json({ ok: false }, { status: 401 });
   }
 
+  let redis: Awaited<ReturnType<typeof getRedis>> | null = null;
+  let lockAcquired = false;
+
   try {
-    const redis = await getRedis();
+    redis = await getRedis();
+
+    const lock = await redis.set(MORNING_BRIEF_RUNNING_KEY, "1", {
+      NX: true,
+      EX: 5 * 60,
+    });
+
+    if (lock !== "OK") {
+      return Response.json({ ok: true, skipped: "already_running" });
+    }
+
+    lockAcquired = true;
+
     const rawChatId = await redis.get(MORNING_BRIEF_CHAT_KEY);
 
     if (!rawChatId) {
@@ -523,5 +539,13 @@ export async function POST(request: Request) {
   } catch (error) {
     console.error("Morning brief failed", error);
     return Response.json({ ok: false }, { status: 500 });
+  } finally {
+    if (redis && lockAcquired) {
+      try {
+        await redis.del(MORNING_BRIEF_RUNNING_KEY);
+      } catch (error) {
+        console.error("Could not release morning brief lock", error);
+      }
+    }
   }
 }
