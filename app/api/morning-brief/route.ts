@@ -533,6 +533,12 @@ export async function POST(request: Request) {
     }
 
     const brief = await buildMorningBrief();
+
+    const chatIdBeforeSend = await redis.get(MORNING_BRIEF_CHAT_KEY);
+    if (!chatIdBeforeSend || Number(chatIdBeforeSend) !== chatId) {
+      return Response.json({ ok: true, skipped: "brief_disabled_before_send" });
+    }
+
     await sendTelegramMessage(chatId, brief);
 
     return Response.json({ ok: true });
