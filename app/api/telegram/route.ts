@@ -60,6 +60,7 @@ const SYSTEM_PROMPT = [
   "Для курсов валют и данных Банка России в первую очередь ищи официальный источник cbr.ru. Для законов и нормативных актов предпочитай официальные государственные публикации. Для расписаний и тарифов предпочитай официальный сайт или приложение соответствующего перевозчика или сервиса.",
   "Не называй данные «официальными», если среди фактически использованных источников нет соответствующего первоисточника.",
   "Если переданы прямые данные Банка России, используй именно их и явно различай официальный ежедневный курс ЦБ и рыночную или биржевую котировку. Не называй официальный курс ЦБ котировкой в реальном времени.",
+  "Если переданы данные Open-Meteo, используй их как основной источник для текущей погоды и прогноза. Указывай температуру, ощущаемую температуру и ключевые условия по запросу Ани. В конце укажи Open-Meteo как источник погодных данных.",
 ].join("\n");
 
 type ChatMessage = {
@@ -167,6 +168,178 @@ function shouldUseWebSearch(text: string) {
 }
 
 const CBR_DAILY_URL = "https://www.cbr.ru/scripts/XML_daily.asp";
+const OPEN_METEO_GEOCODING = "https://geocoding-api.open-meteo.com/v1/search";
+const OPEN_METEO_FORECAST = "https://api.open-meteo.com/v1/forecast";
+
+function isWeatherQuery(text: string) {
+  return /(погод|температур|прогноз|дожд|снег|ветер|осадк|давлен|влажност)/i.test(
+    text
+  );
+}
+
+async function normalizeWeatherLocation(userText: string) {
+  const apiKey = process.env.YANDEX_API_KEY;
+  const folderId = process.env.YANDEX_FOLDER_ID;
+
+  if (!apiKey || !folderId) {
+    throw new Error("Yandex credentials are missing for weather location");
+  }
+
+  const response = await fetch(YANDEX_API, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Api-Key ${apiKey}`,
+      "x-folder-id": folderId,
+    },
+    body: JSON.stringify({
+      model: `gpt://${folderId}/yandexgpt/latest`,
+      temperature: 0,
+      max_tokens: 80,
+      messages: [
+        {
+          role: "system",
+          content:
+            "Извлеки из запроса название города или населённого пункта и верни только его в именительном падеже, без пояснений. Если место не указано, верни Красноярск.",
+        },
+        {
+          role: "user",
+          content: userText,
+        },
+      ],
+    }),
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(
+      `Weather location normalization failed: ${response.status} ${JSON.stringify(data)}`
+    );
+  }
+
+  const location =
+    data?.choices?.[0]?.message?.content ??
+    data?.result?.alternatives?.[0]?.message?.text ??
+    "Красноярск";
+
+  return String(location).trim().replace(/[."']/g, "");
+}
+
+function weatherCodeRu(code: number) {
+  const map: Record<number, string> = {
+    0: "ясно",
+    1: "преимущественно ясно",
+    2: "переменная облачность",
+    3: "пасмурно",
+    45: "туман",
+    48: "изморозь и туман",
+    51: "слабая морось",
+    53: "морось",
+    55: "сильная морось",
+    56: "слабая ледяная морось",
+    57: "сильная ледяная морось",
+    61: "слабый дождь",
+    63: "дождь",
+    65: "сильный дождь",
+    66: "слабый ледяной дождь",
+    67: "сильный ледяной дождь",
+    71: "слабый снег",
+    73: "снег",
+    75: "сильный снег",
+    77: "снежные зёрна",
+    80: "слабые ливни",
+    81: "ливни",
+    82: "сильные ливни",
+    85: "слабые снежные заряды",
+    86: "сильные снежные заряды",
+    95: "гроза",
+    96: "гроза с небольшим градом",
+    99: "гроза с сильным градом",
+  };
+
+  return map[code] || `код погоды ${code}`;
+}
+
+async function fetchWeatherContext(userText: string) {
+  const locationName = await normalizeWeatherLocation(userText);
+
+  const geoUrl = new URL(OPEN_METEO_GEOCODING);
+  geoUrl.searchParams.set("name", locationName);
+  geoUrl.searchParams.set("count", "1");
+  geoUrl.searchParams.set("language", "ru");
+  geoUrl.searchParams.set("format", "json");
+
+  const geoResponse = await fetch(geoUrl);
+  const geoData = await geoResponse.json();
+
+  if (!geoResponse.ok || !Array.isArray(geoData?.results) || !geoData.results[0]) {
+    throw new Error(`Open-Meteo geocoding failed for ${locationName}`);
+  }
+
+  const place = geoData.results[0];
+  const forecastUrl = new URL(OPEN_METEO_FORECAST);
+  forecastUrl.searchParams.set("latitude", String(place.latitude));
+  forecastUrl.searchParams.set("longitude", String(place.longitude));
+  forecastUrl.searchParams.set(
+    "current",
+    [
+      "temperature_2m",
+      "apparent_temperature",
+      "relative_humidity_2m",
+      "precipitation",
+      "weather_code",
+      "wind_speed_10m",
+      "wind_direction_10m",
+      "pressure_msl",
+    ].join(",")
+  );
+  forecastUrl.searchParams.set(
+    "daily",
+    [
+      "weather_code",
+      "temperature_2m_max",
+      "temperature_2m_min",
+      "precipitation_probability_max",
+    ].join(",")
+  );
+  forecastUrl.searchParams.set("forecast_days", "3");
+  forecastUrl.searchParams.set("timezone", "auto");
+
+  const weatherResponse = await fetch(forecastUrl);
+  const weather = await weatherResponse.json();
+
+  if (!weatherResponse.ok || !weather?.current) {
+    throw new Error(
+      `Open-Meteo forecast failed: ${weatherResponse.status} ${JSON.stringify(weather)}`
+    );
+  }
+
+  const c = weather.current;
+  const daily = weather.daily;
+  const days = Array.isArray(daily?.time)
+    ? daily.time.map((date: string, index: number) => {
+        const min = daily.temperature_2m_min?.[index];
+        const max = daily.temperature_2m_max?.[index];
+        const rain = daily.precipitation_probability_max?.[index];
+        const code = daily.weather_code?.[index];
+
+        return `${date}: ${weatherCodeRu(Number(code))}, ${min}...${max} °C, вероятность осадков до ${rain}%`;
+      })
+    : [];
+
+  return [
+    `Точное место: ${place.name}, ${place.admin1 || ""}, ${place.country || ""}.`,
+    `Координаты: ${place.latitude}, ${place.longitude}.`,
+    `Часовой пояс: ${weather.timezone || place.timezone || "не указан"}.`,
+    `Текущие данные на ${c.time}: температура ${c.temperature_2m} °C, ощущается как ${c.apparent_temperature} °C, ${weatherCodeRu(Number(c.weather_code))}, влажность ${c.relative_humidity_2m}%, осадки ${c.precipitation} мм, ветер ${c.wind_speed_10m} км/ч, направление ${c.wind_direction_10m}°, давление ${c.pressure_msl} гПа.`,
+    days.length ? "Прогноз:\n" + days.join("\n") : "",
+    "Источник погодных данных: Open-Meteo, https://open-meteo.com/",
+    "Геокодирование: Open-Meteo / GeoNames.",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
 
 function detectCbrCurrencyCode(text: string) {
   const normalized = text.toLowerCase();
@@ -483,11 +656,25 @@ export async function POST(request: Request) {
     const history = await loadHistory(chatId);
     const webNeeded = shouldUseWebSearch(text);
     const queryText = normalizeWebQuery(text);
+    const weatherNeeded = isWeatherQuery(queryText);
     const cbrCurrencyCode = detectCbrCurrencyCode(queryText);
     let webContext: string | undefined;
     let webSearchFailed = false;
 
-    if (cbrCurrencyCode) {
+    if (weatherNeeded) {
+      try {
+        webContext = await fetchWeatherContext(queryText);
+      } catch (error) {
+        console.error("Open-Meteo weather failed", error);
+
+        try {
+          webContext = await searchWeb(queryText);
+        } catch (searchError) {
+          webSearchFailed = true;
+          console.error("Weather fallback web search failed", searchError);
+        }
+      }
+    } else if (cbrCurrencyCode) {
       try {
         webContext = await fetchOfficialCbrRate(cbrCurrencyCode);
       } catch (error) {
