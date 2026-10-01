@@ -71,6 +71,7 @@ type ChatMessage = {
 };
 
 type TelegramUpdate = {
+  update_id?: number;
   message?: {
     chat?: { id?: number };
     text?: string;
@@ -97,6 +98,21 @@ async function getRedis() {
 
 function historyKey(chatId: number) {
   return `telegram:history:${chatId}`;
+}
+
+
+async function isDuplicateTelegramUpdate(updateId?: number) {
+  if (!Number.isFinite(updateId)) return false;
+
+  try {
+    const redis = await getRedis();
+    const key = `telegram:update:${updateId}`;
+    const created = await redis.set(key, "1", { NX: true, EX: 60 * 60 });
+    return created !== "OK";
+  } catch (error) {
+    console.error("Could not deduplicate Telegram update", error);
+    return false;
+  }
 }
 
 async function loadHistory(chatId: number): Promise<ChatMessage[]> {
@@ -856,6 +872,10 @@ export async function POST(request: Request) {
     update = await request.json();
   } catch {
     return Response.json({ ok: true });
+  }
+
+  if (await isDuplicateTelegramUpdate(update.update_id)) {
+    return Response.json({ ok: true, duplicate: true });
   }
 
   const chatId = update.message?.chat?.id;
