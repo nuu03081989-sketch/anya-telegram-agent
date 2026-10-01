@@ -1,8 +1,12 @@
+import { createClient } from "redis";
+
 export const runtime = "nodejs";
 
 const TELEGRAM_API = "https://api.telegram.org";
 const YANDEX_API = "https://ai.api.cloud.yandex.net/v1/chat/completions";
 const WEBHOOK_URL = "https://anya-telegram-agent.vercel.app/api/telegram";
+const HISTORY_LIMIT = 30;
+const HISTORY_TTL_SECONDS = 60 * 60 * 24 * 14;
 
 const SYSTEM_PROMPT = [
   "Тебя зовут Саня. Ты мужского пола и работаешь как персональный ИИ-ассистент Ани.",
@@ -17,7 +21,13 @@ const SYSTEM_PROMPT = [
   "Для сервисов, API и регистраций учитывай, что Аня живёт в России. Если доступность сервиса, оплата или ограничения могут зависеть от страны и ты не уверен в актуальности, прямо скажи об этом и не выдавай догадку за факт.",
   "Не используй конструкцию «это не x это y».",
   "Отвечай достаточно кратко, если Аня не просит подробностей.",
+  "У тебя есть краткосрочная память последних сообщений этого Telegram-чата. Используй её, чтобы понимать контекст и не просить Аню повторять то, что уже было сказано недавно.",
 ].join("\n");
+
+type ChatMessage = {
+  role: "user" | "assistant";
+  content: string;
+};
 
 type TelegramUpdate = {
   message?: {
@@ -25,6 +35,84 @@ type TelegramUpdate = {
     text?: string;
   };
 };
+
+let redisClient: ReturnType<typeof createClient> | null = null;
+
+async function getRedis() {
+  const url = process.env.REDIS_URL;
+  if (!url) throw new Error("REDIS_URL is missing");
+
+  if (!redisClient) {
+    redisClient = createClient({ url });
+    redisClient.on("error", (error) => console.error("Redis error", error));
+  }
+
+  if (!redisClient.isOpen) {
+    await redisClient.connect();
+  }
+
+  return redisClient;
+}
+
+function historyKey(chatId: number) {
+  return `telegram:history:${chatId}`;
+}
+
+async function loadHistory(chatId: number): Promise<ChatMessage[]> {
+  try {
+    const redis = await getRedis();
+    const items = await redis.lRange(historyKey(chatId), -HISTORY_LIMIT, -1);
+
+    return items.flatMap((item) => {
+      try {
+        const parsed = JSON.parse(item) as ChatMessage;
+        if (
+          (parsed.role === "user" || parsed.role === "assistant") &&
+          typeof parsed.content === "string"
+        ) {
+          return [parsed];
+        }
+      } catch {}
+
+      return [];
+    });
+  } catch (error) {
+    console.error("Could not load Redis history", error);
+    return [];
+  }
+}
+
+async function saveExchange(
+  chatId: number,
+  userText: string,
+  assistantText: string
+) {
+  try {
+    const redis = await getRedis();
+    const key = historyKey(chatId);
+
+    await redis
+      .multi()
+      .rPush(key, JSON.stringify({ role: "user", content: userText }))
+      .rPush(key, JSON.stringify({ role: "assistant", content: assistantText }))
+      .lTrim(key, -HISTORY_LIMIT, -1)
+      .expire(key, HISTORY_TTL_SECONDS)
+      .exec();
+  } catch (error) {
+    console.error("Could not save Redis history", error);
+  }
+}
+
+async function clearHistory(chatId: number) {
+  try {
+    const redis = await getRedis();
+    await redis.del(historyKey(chatId));
+    return true;
+  } catch (error) {
+    console.error("Could not clear Redis history", error);
+    return false;
+  }
+}
 
 async function sendTelegramMessage(chatId: number, text: string) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -70,7 +158,7 @@ async function configureWebhookSecret() {
   }
 }
 
-async function askYandex(userText: string) {
+async function askYandex(userText: string, history: ChatMessage[]) {
   const apiKey = process.env.YANDEX_API_KEY;
   const folderId = process.env.YANDEX_FOLDER_ID;
 
@@ -93,6 +181,7 @@ async function askYandex(userText: string) {
           role: "system",
           content: SYSTEM_PROMPT,
         },
+        ...history,
         {
           role: "user",
           content: userText,
@@ -160,10 +249,23 @@ export async function POST(request: Request) {
     return Response.json({ ok: true });
   }
 
+  if (text === "/reset" || text === "/forget") {
+    const cleared = await clearHistory(chatId);
+    await sendTelegramMessage(
+      chatId,
+      cleared
+        ? "Аня, историю этого Telegram-чата очистил."
+        : "Аня, не смог очистить историю. Попробуй ещё раз чуть позже."
+    );
+    return Response.json({ ok: true });
+  }
+
   try {
     await sendTelegramMessage(chatId, "Принял. Думаю...");
-    const answer = await askYandex(text);
+    const history = await loadHistory(chatId);
+    const answer = await askYandex(text, history);
     await sendTelegramMessage(chatId, answer);
+    await saveExchange(chatId, text, answer);
   } catch (error) {
     console.error(error);
     await sendTelegramMessage(
