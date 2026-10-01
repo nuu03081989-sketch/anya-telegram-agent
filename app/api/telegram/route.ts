@@ -196,11 +196,17 @@ async function searchWeb(queryText: string) {
     );
   }
 
-  const searchAnswer = data?.message?.content;
-  const sources = Array.isArray(data?.sources) ? data.sources : [];
+  // Yandex GenSearch REST may return an array of responses even when
+  // getPartialResults=false. Support both the documented object shape and
+  // the array shape shown in Yandex's own examples.
+  const result = Array.isArray(data) ? data[data.length - 1] : data;
+  const searchAnswer = result?.message?.content;
+  const sources = Array.isArray(result?.sources) ? result.sources : [];
 
   if (!searchAnswer && sources.length === 0) {
-    throw new Error("Yandex Search API returned no answer and no sources");
+    throw new Error(
+      `Yandex Search API returned no answer and no sources: ${JSON.stringify(data).slice(0, 1200)}`
+    );
   }
 
   const sourceLines = sources
