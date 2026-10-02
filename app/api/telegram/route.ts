@@ -8,6 +8,7 @@ const YANDEX_SEARCH_API = "https://searchapi.api.cloud.yandex.net/v2/web/search"
 const YANDEX_IMAGE_SEARCH_API = "https://searchapi.api.cloud.yandex.net/v2/image/search";
 const YANDEX_IMAGE_BY_IMAGE_API = "https://searchapi.api.cloud.yandex.net/v2/image/search_by_image";
 const YANDEX_VISION_MODEL = "qwen3.6-35b-a3b";
+const YANDEX_SPEECHKIT_STT_API = "https://stt.api.cloud.yandex.net";
 const WEBHOOK_URL = "https://anya-telegram-agent.vercel.app/api/telegram";
 const PUBLIC_APP_URL = "https://anya-telegram-agent.vercel.app";
 const HISTORY_STORE_LIMIT = 30;
@@ -90,6 +91,14 @@ type TelegramDocument = {
   file_size?: number;
 };
 
+type TelegramVoice = {
+  file_id?: string;
+  file_unique_id?: string;
+  duration?: number;
+  mime_type?: string;
+  file_size?: number;
+};
+
 type TelegramUpdate = {
   update_id?: number;
   message?: {
@@ -98,6 +107,7 @@ type TelegramUpdate = {
     caption?: string;
     photo?: TelegramPhotoSize[];
     document?: TelegramDocument;
+    voice?: TelegramVoice;
   };
 };
 
@@ -681,6 +691,268 @@ async function downloadTelegramFile(fileId: string) {
   }
 
   return bytes;
+}
+
+
+async function downloadTelegramVoice(fileId: string) {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token) throw new Error("TELEGRAM_BOT_TOKEN is missing");
+
+  const fileResponse = await fetch(
+    `${TELEGRAM_API}/bot${token}/getFile?file_id=${encodeURIComponent(fileId)}`
+  );
+  const fileData = await fileResponse.json();
+
+  if (!fileResponse.ok || fileData?.ok !== true || !fileData?.result?.file_path) {
+    throw new Error(
+      `Telegram voice getFile failed: ${fileResponse.status} ${JSON.stringify(fileData)}`
+    );
+  }
+
+  const downloadResponse = await fetch(
+    `${TELEGRAM_API}/file/bot${token}/${fileData.result.file_path}`
+  );
+
+  if (!downloadResponse.ok) {
+    throw new Error(
+      `Telegram voice download failed: ${downloadResponse.status}`
+    );
+  }
+
+  const bytes = Buffer.from(await downloadResponse.arrayBuffer());
+
+  if (bytes.length > 10 * 1024 * 1024) {
+    throw new Error("VOICE_TOO_LARGE");
+  }
+
+  return bytes;
+}
+
+function parseJsonObjectStream(raw: string) {
+  const results: any[] = [];
+  let start = -1;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = 0; index < raw.length; index += 1) {
+    const char = raw[index];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (char === "{") {
+      if (depth === 0) start = index;
+      depth += 1;
+      continue;
+    }
+
+    if (char === "}") {
+      depth -= 1;
+
+      if (depth === 0 && start >= 0) {
+        try {
+          results.push(JSON.parse(raw.slice(start, index + 1)));
+        } catch {}
+        start = -1;
+      }
+    }
+  }
+
+  return results;
+}
+
+function extractSpeechKitTranscript(raw: string) {
+  const events = parseJsonObjectStream(raw);
+  const finals = new Map<number, string>();
+  const refinements = new Map<number, string>();
+  let fallback = "";
+
+  for (const event of events) {
+    const payload = event?.result ?? event;
+
+    const rawFinal = String(
+      payload?.final?.alternatives?.[0]?.text ?? ""
+    ).trim();
+
+    if (rawFinal) {
+      const index = Number(payload?.audioCursors?.finalIndex);
+      const safeIndex = Number.isFinite(index) ? index : finals.size;
+      finals.set(safeIndex, rawFinal);
+      fallback = rawFinal;
+    }
+
+    const normalized = String(
+      payload?.finalRefinement?.normalizedText?.alternatives?.[0]?.text ?? ""
+    ).trim();
+
+    if (normalized) {
+      const index = Number(payload?.finalRefinement?.finalIndex);
+      const safeIndex = Number.isFinite(index) ? index : refinements.size;
+      refinements.set(safeIndex, normalized);
+      fallback = normalized;
+    }
+
+    const partial = String(
+      payload?.partial?.alternatives?.[0]?.text ?? ""
+    ).trim();
+
+    if (partial) fallback = partial;
+  }
+
+  const indexes = Array.from(
+    new Set([...finals.keys(), ...refinements.keys()])
+  ).sort((a, b) => a - b);
+
+  const combined = indexes
+    .map((index) => refinements.get(index) || finals.get(index) || "")
+    .filter(Boolean)
+    .join(" ")
+    .trim();
+
+  return combined || fallback;
+}
+
+async function transcribeTelegramVoice(bytes: Buffer) {
+  const apiKey =
+    process.env.YANDEX_SPEECHKIT_API_KEY || process.env.YANDEX_API_KEY;
+  const folderId = process.env.YANDEX_FOLDER_ID;
+
+  if (!apiKey || !folderId) {
+    throw new Error("SPEECHKIT_NOT_CONFIGURED");
+  }
+
+  const headers = {
+    "Content-Type": "application/json",
+    Authorization: `Api-Key ${apiKey}`,
+    "x-folder-id": folderId,
+  };
+
+  const startResponse = await fetch(
+    `${YANDEX_SPEECHKIT_STT_API}/stt/v3/recognizeFileAsync`,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        content: bytes.toString("base64"),
+        recognitionModel: {
+          model: "general",
+          audioFormat: {
+            containerAudio: {
+              containerAudioType: "OGG_OPUS",
+            },
+          },
+          textNormalization: {
+            textNormalization: "TEXT_NORMALIZATION_ENABLED",
+            profanityFilter: false,
+            literatureText: false,
+            phoneFormattingMode: "PHONE_FORMATTING_MODE_DISABLED",
+          },
+          languageRestriction: {
+            restrictionType: "WHITELIST",
+            languageCode: ["ru-RU"],
+          },
+        },
+      }),
+    }
+  );
+
+  const startText = await startResponse.text();
+  let startData: any = {};
+
+  try {
+    startData = startText ? JSON.parse(startText) : {};
+  } catch {}
+
+  if (!startResponse.ok || !startData?.id) {
+    if (startResponse.status === 401 || startResponse.status === 403) {
+      throw new Error("SPEECHKIT_PERMISSION_DENIED");
+    }
+
+    throw new Error(
+      `SPEECHKIT_START_FAILED: ${startResponse.status} ${startText.slice(0, 800)}`
+    );
+  }
+
+  const operationId = String(startData.id);
+  const deadline = Date.now() + 120_000;
+
+  while (Date.now() < deadline) {
+    const operationResponse = await fetch(
+      `https://operation.api.cloud.yandex.net/operations/${encodeURIComponent(operationId)}`,
+      {
+        headers: {
+          Authorization: `Api-Key ${apiKey}`,
+        },
+      }
+    );
+
+    const operationText = await operationResponse.text();
+    let operationData: any = {};
+
+    try {
+      operationData = operationText ? JSON.parse(operationText) : {};
+    } catch {}
+
+    if (operationResponse.status === 401 || operationResponse.status === 403) {
+      throw new Error("SPEECHKIT_PERMISSION_DENIED");
+    }
+
+    if (operationResponse.ok && operationData?.error) {
+      throw new Error(
+        `SPEECHKIT_RECOGNITION_FAILED: ${JSON.stringify(operationData.error).slice(0, 800)}`
+      );
+    }
+
+    if (operationResponse.ok && operationData?.done === true) {
+      const resultResponse = await fetch(
+        `${YANDEX_SPEECHKIT_STT_API}/stt/v3/getRecognition?operationId=${encodeURIComponent(operationId)}`,
+        {
+          headers: {
+            Authorization: `Api-Key ${apiKey}`,
+            "x-folder-id": folderId,
+          },
+        }
+      );
+
+      const resultText = await resultResponse.text();
+
+      if (resultResponse.status === 401 || resultResponse.status === 403) {
+        throw new Error("SPEECHKIT_PERMISSION_DENIED");
+      }
+
+      if (!resultResponse.ok) {
+        throw new Error(
+          `SPEECHKIT_RESULT_FAILED: ${resultResponse.status} ${resultText.slice(0, 800)}`
+        );
+      }
+
+      const transcript = extractSpeechKitTranscript(resultText);
+
+      if (!transcript) {
+        throw new Error("SPEECHKIT_EMPTY_TRANSCRIPT");
+      }
+
+      return transcript;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+
+  throw new Error("SPEECHKIT_TIMEOUT");
 }
 
 function documentExtension(fileName: string) {
@@ -1486,14 +1758,15 @@ export async function POST(request: Request) {
   }
 
   const chatId = update.message?.chat?.id;
-  const text =
+  let text =
     update.message?.text?.trim() || update.message?.caption?.trim() || "";
   const photos = Array.isArray(update.message?.photo)
     ? update.message.photo
     : [];
   const document = update.message?.document;
+  const voice = update.message?.voice;
 
-  if (!chatId || (!text && photos.length === 0 && !document)) {
+  if (!chatId || (!text && photos.length === 0 && !document && !voice)) {
     return Response.json({ ok: true });
   }
 
@@ -1555,6 +1828,72 @@ export async function POST(request: Request) {
 
   try {
     const history = await loadHistory(chatId);
+
+    if (voice?.file_id) {
+      const duration = Number(voice.duration || 0);
+
+      if (duration > 300) {
+        await sendTelegramMessage(
+          chatId,
+          "Аня, голосовое длиннее 5 минут. Пришли его короче или разбей на две части."
+        );
+        return Response.json({ ok: true });
+      }
+
+      if (Number(voice.file_size || 0) > 10 * 1024 * 1024) {
+        await sendTelegramMessage(
+          chatId,
+          "Аня, голосовое получилось слишком тяжёлым. Для голосовых держим лимит 10 МБ и до 5 минут."
+        );
+        return Response.json({ ok: true });
+      }
+
+      await sendTelegramMessage(chatId, "Слушаю голосовое...");
+
+      try {
+        const bytes = await downloadTelegramVoice(voice.file_id);
+        text = (await transcribeTelegramVoice(bytes)).trim();
+
+        if (!text) {
+          throw new Error("SPEECHKIT_EMPTY_TRANSCRIPT");
+        }
+      } catch (error) {
+        console.error("Voice transcription failed", error);
+        const message = String(error);
+
+        if (message.includes("VOICE_TOO_LARGE")) {
+          await sendTelegramMessage(
+            chatId,
+            "Аня, голосовое получилось слишком тяжёлым. Для голосовых держим лимит 10 МБ и до 5 минут."
+          );
+        } else if (
+          message.includes("SPEECHKIT_NOT_CONFIGURED") ||
+          message.includes("SPEECHKIT_PERMISSION_DENIED")
+        ) {
+          await sendTelegramMessage(
+            chatId,
+            "Аня, голосовое получил, но у SpeechKit пока нет нужного доступа. Нужно проверить право ai.speechkit-stt.user у сервисного аккаунта sanya-agent и доступ API-ключа к SpeechKit."
+          );
+        } else if (message.includes("SPEECHKIT_TIMEOUT")) {
+          await sendTelegramMessage(
+            chatId,
+            "Аня, SpeechKit слишком долго распознавал голосовое. Попробуй ещё раз или пришли запись короче."
+          );
+        } else if (message.includes("SPEECHKIT_EMPTY_TRANSCRIPT")) {
+          await sendTelegramMessage(
+            chatId,
+            "Аня, голосовое получил, но речь разобрать не получилось. Попробуй записать ещё раз чуть ближе к микрофону."
+          );
+        } else {
+          await sendTelegramMessage(
+            chatId,
+            "Аня, голосовое получил, но распознать его сейчас не получилось. Попробуй ещё раз чуть позже."
+          );
+        }
+
+        return Response.json({ ok: true });
+      }
+    }
 
     if (document?.file_id) {
       await sendTelegramMessage(chatId, "Читаю документ...");
