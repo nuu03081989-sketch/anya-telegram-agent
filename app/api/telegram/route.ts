@@ -112,16 +112,22 @@ type TelegramVoice = {
   file_size?: number;
 };
 
-type TelegramUpdate = {
-  update_id?: number;
-  message?: {
-    chat?: { id?: number };
+type TelegramMessage = {
+  chat?: { id?: number };
+  text?: string;
+  caption?: string;
+  photo?: TelegramPhotoSize[];
+  document?: TelegramDocument;
+  voice?: TelegramVoice;
+  reply_to_message?: {
     text?: string;
     caption?: string;
-    photo?: TelegramPhotoSize[];
-    document?: TelegramDocument;
-    voice?: TelegramVoice;
   };
+};
+
+type TelegramUpdate = {
+  update_id?: number;
+  message?: TelegramMessage;
 };
 
 let redisClient: ReturnType<typeof createClient> | null = null;
@@ -1414,33 +1420,53 @@ function isWardrobeImageContext(text: string) {
   );
 }
 
+function contextItemLabel(item: string, index: number) {
+  const compact = item.replace(/\s+/g, " ").trim();
+  const short =
+    compact.match(/^(.{2,70}?)(?::|\s[-–—]\s)/)?.[1]?.trim() ||
+    compact.slice(0, 70).trim();
+
+  return short
+    ? `Вариант ${index + 1}: ${short}`
+    : `Вариант ${index + 1}`;
+}
+
 function contextualImageQueries(
   history: ChatMessage[],
-  requestText: string
+  requestText: string,
+  repliedText = ""
 ) {
-  let assistantContext = "";
-  let listItems: string[] = [];
+  let assistantContext = repliedText.trim();
+  let listItems = assistantContext
+    ? extractContextListItems(assistantContext)
+    : [];
 
-  for (let index = history.length - 1; index >= 0; index -= 1) {
-    const message = history[index];
-    if (message?.role !== "assistant") continue;
+  if (listItems.length < 2) {
+    assistantContext = "";
+    listItems = [];
 
-    const items = extractContextListItems(message.content);
-    if (items.length >= 2) {
-      assistantContext = message.content;
-      listItems = items;
-      break;
+    for (let index = history.length - 1; index >= 0; index -= 1) {
+      const message = history[index];
+      if (message?.role !== "assistant") continue;
+
+      const items = extractContextListItems(message.content);
+      if (items.length >= 2) {
+        assistantContext = message.content;
+        listItems = items;
+        break;
+      }
     }
   }
 
   if (!assistantContext) {
-    assistantContext = latestHistoryMessage(history, "assistant");
+    assistantContext = repliedText.trim() || latestHistoryMessage(history, "assistant");
   }
 
   if (!assistantContext) return [];
 
   const recentContext = [
     requestText,
+    repliedText,
     ...history.slice(-10).map((message) => message.content),
   ].join("\n");
   const wardrobeContext = isWardrobeImageContext(recentContext);
@@ -1483,7 +1509,7 @@ function contextualImageQueries(
         : item;
 
       return {
-        label: `Вариант ${index + 1}: ${item.slice(0, 90)}`,
+        label: contextItemLabel(item, index),
         query,
         fallbackQuery,
       };
@@ -2079,6 +2105,10 @@ export async function POST(request: Request) {
     : [];
   const document = update.message?.document;
   const voice = update.message?.voice;
+  const repliedText =
+    update.message?.reply_to_message?.text?.trim() ||
+    update.message?.reply_to_message?.caption?.trim() ||
+    "";
 
   if (!chatId || (!text && photos.length === 0 && !document && !voice)) {
     return Response.json({ ok: true });
@@ -2428,7 +2458,7 @@ export async function POST(request: Request) {
       await sendTelegramMessage(chatId, "Ищу изображения...");
 
       if (isContextualImageRequest(text)) {
-        const queries = contextualImageQueries(history, text);
+        const queries = contextualImageQueries(history, text, repliedText);
 
         if (queries.length === 0) {
           await sendTelegramMessage(
