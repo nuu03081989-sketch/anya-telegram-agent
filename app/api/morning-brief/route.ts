@@ -123,7 +123,7 @@ async function sendYandexBudgetAlert(chatId: number) {
 
   const thresholds = [250, 400, 500];
   const crossed = thresholds.filter(
-    (threshold) => summary.expense >= threshold
+    (threshold) => summary.cost >= threshold
   );
 
   if (crossed.length === 0) return;
@@ -141,12 +141,13 @@ async function sendYandexBudgetAlert(chatId: number) {
   if (reserved !== "OK") return;
 
   try {
-    const percent = Math.round((summary.expense / 500) * 100);
+    const percent = Math.round((summary.cost / 500) * 100);
     await sendTelegramMessage(
       chatId,
       [
-        `Аня, расходы Yandex Cloud за месяц достигли ${summary.expense.toFixed(2).replace(".", ",")} ₽ из бюджета 500 ₽ (${percent}%).`,
-        `Контрольный порог ${threshold} ₽ пройден.`,
+        `Аня, потребление Yandex Cloud за месяц достигло ${summary.cost.toFixed(2).replace(".", ",")} ₽ из контрольного бюджета 500 ₽ (${percent}%).`,
+        `Фактически к оплате после грантов и скидок сейчас: ${summary.expense.toFixed(2).replace(".", ",")} ₽.`,
+        `Контрольный порог ${threshold} ₽ по потреблению пройден.`,
         "За что платим: YandexGPT, веб-поиск, OCR, SpeechKit и облачные функции бота.",
         "Проверить расходы: https://console.yandex.cloud/billing",
       ].join("\n")
