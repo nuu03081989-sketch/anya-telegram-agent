@@ -1901,19 +1901,52 @@ export async function POST(request: Request) {
 
   if (text === "/expenses") {
     let yandexBilling = null;
+    let billingDiagnostic = "";
 
     try {
       yandexBilling = await getYandexBillingSummary();
     } catch (error) {
-      console.error(
-        "Could not read Yandex Billing",
-        error instanceof Error ? error.message : "unknown error"
-      );
+      const message =
+        error instanceof Error ? error.message : "unknown error";
+
+      console.error("Could not read Yandex Billing", message);
+
+      if (message.includes("YANDEX_SERVICE_ACCOUNT_KEY_JSON is missing")) {
+        billingDiagnostic = "KEY_MISSING";
+      } else if (message.includes("not valid JSON")) {
+        billingDiagnostic = "KEY_JSON_INVALID";
+      } else if (message.includes("incomplete key data")) {
+        billingDiagnostic = "KEY_INCOMPLETE";
+      } else if (message.startsWith("Yandex IAM token request failed:")) {
+        const status = message.match(/failed:\s*(\d+)/)?.[1] || "UNKNOWN";
+        billingDiagnostic = `IAM_HTTP_${status}`;
+      } else if (message.startsWith("Yandex Billing account list failed:")) {
+        const status = message.match(/failed:\s*(\d+)/)?.[1] || "UNKNOWN";
+        billingDiagnostic = `ACCOUNT_LIST_HTTP_${status}`;
+      } else if (message.includes("No active Yandex Billing account")) {
+        billingDiagnostic = "ACCOUNT_NOT_FOUND";
+      } else if (message.includes("More than one active Yandex Billing account")) {
+        billingDiagnostic = "ACCOUNT_MULTIPLE";
+      } else if (message.startsWith("Yandex Billing gRPC HTTP status")) {
+        const status = message.match(/status\s+(\d+)/)?.[1] || "UNKNOWN";
+        billingDiagnostic = `USAGE_HTTP_${status}`;
+      } else if (message.startsWith("Yandex Billing gRPC failed:")) {
+        const status = message.match(/failed:\s*(\d+)/)?.[1] || "UNKNOWN";
+        billingDiagnostic = `USAGE_GRPC_${status}`;
+      } else if (message.includes("gRPC")) {
+        billingDiagnostic = "USAGE_GRPC_PROTOCOL";
+      } else {
+        billingDiagnostic = "UNKNOWN";
+      }
     }
+
+    const report = formatExpenseOverview(new Date(), yandexBilling);
 
     await sendTelegramMessage(
       chatId,
-      formatExpenseOverview(new Date(), yandexBilling)
+      billingDiagnostic
+        ? `${report}\n\nДиагностика Yandex Cloud: ${billingDiagnostic}`
+        : report
     );
     return Response.json({ ok: true });
   }
