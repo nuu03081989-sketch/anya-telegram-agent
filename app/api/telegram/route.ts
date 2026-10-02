@@ -5,6 +5,9 @@ export const runtime = "nodejs";
 const TELEGRAM_API = "https://api.telegram.org";
 const YANDEX_API = "https://ai.api.cloud.yandex.net/v1/chat/completions";
 const YANDEX_SEARCH_API = "https://searchapi.api.cloud.yandex.net/v2/gen/search";
+const YANDEX_IMAGE_SEARCH_API = "https://searchapi.api.cloud.yandex.net/v2/image/search";
+const YANDEX_IMAGE_BY_IMAGE_API = "https://searchapi.api.cloud.yandex.net/v2/image/search_by_image";
+const YANDEX_VISION_MODEL = "qwen3.6-35b-a3b";
 const WEBHOOK_URL = "https://anya-telegram-agent.vercel.app/api/telegram";
 const PUBLIC_APP_URL = "https://anya-telegram-agent.vercel.app";
 const HISTORY_LIMIT = 30;
@@ -70,11 +73,21 @@ type ChatMessage = {
   content: string;
 };
 
+type TelegramPhotoSize = {
+  file_id?: string;
+  file_unique_id?: string;
+  width?: number;
+  height?: number;
+  file_size?: number;
+};
+
 type TelegramUpdate = {
   update_id?: number;
   message?: {
     chat?: { id?: number };
     text?: string;
+    caption?: string;
+    photo?: TelegramPhotoSize[];
   };
 };
 
@@ -628,6 +641,228 @@ async function fetchOfficialCbrRate(charCode: string) {
   ].join("\n");
 }
 
+function isImageSearchQuery(text: string) {
+  const normalized = text.trim();
+  if (/^\/image\b/i.test(normalized)) return true;
+
+  return /(?:найди|покажи|подбери|поищи).*(?:картин|изображен|фото)/i.test(
+    normalized
+  );
+}
+
+function normalizeImageSearchQuery(text: string) {
+  return text
+    .replace(/^\/image\s*/i, "")
+    .replace(
+      /^(?:саня[,\s]*)?(?:найди|покажи|подбери|поищи)\s+(?:мне\s+)?(?:картин\w*|изображени\w*|фото(?:графи\w*)?)\s*/i,
+      ""
+    )
+    .trim();
+}
+
+function wantsSimilarImages(text: string) {
+  return /(?:найди|покажи|поищи|подбери).*(?:похож|аналог).*(?:картин|изображен|фото)|(?:похож).*(?:картин|изображен|фото)/i.test(
+    text
+  );
+}
+
+async function downloadTelegramPhotoBase64(fileId: string) {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token) throw new Error("TELEGRAM_BOT_TOKEN is missing");
+
+  const fileResponse = await fetch(
+    `${TELEGRAM_API}/bot${token}/getFile?file_id=${encodeURIComponent(fileId)}`
+  );
+  const fileData = await fileResponse.json();
+
+  if (!fileResponse.ok || fileData?.ok !== true || !fileData?.result?.file_path) {
+    throw new Error(
+      `Telegram getFile failed: ${fileResponse.status} ${JSON.stringify(fileData)}`
+    );
+  }
+
+  const imageResponse = await fetch(
+    `${TELEGRAM_API}/file/bot${token}/${fileData.result.file_path}`
+  );
+
+  if (!imageResponse.ok) {
+    throw new Error(`Telegram photo download failed: ${imageResponse.status}`);
+  }
+
+  const bytes = Buffer.from(await imageResponse.arrayBuffer());
+
+  if (bytes.length > 14 * 1024 * 1024) {
+    throw new Error("Telegram photo is too large for multimodal analysis");
+  }
+
+  return bytes.toString("base64");
+}
+
+async function analyzeTelegramPhoto(base64Image: string, userPrompt: string) {
+  const apiKey = process.env.YANDEX_API_KEY;
+  const folderId = process.env.YANDEX_FOLDER_ID;
+
+  if (!apiKey) throw new Error("YANDEX_API_KEY is missing");
+  if (!folderId) throw new Error("YANDEX_FOLDER_ID is missing");
+
+  const prompt =
+    userPrompt ||
+    "Опиши, что изображено на фотографии. Если видишь предмет, товар, документ, повреждение или техническую деталь, назови это как можно точнее. Не выдумывай то, чего не видно.";
+
+  const response = await fetch(YANDEX_API, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Api-Key ${apiKey}`,
+      "x-folder-id": folderId,
+    },
+    body: JSON.stringify({
+      model: `gpt://${folderId}/${YANDEX_VISION_MODEL}`,
+      temperature: 0.2,
+      max_tokens: 1000,
+      messages: [
+        {
+          role: "system",
+          content:
+            "Ты Саня, персональный ИИ-ассистент Ани. Анализируй только то, что реально видно на изображении. Если объект или деталь нельзя определить уверенно, прямо скажи об этом. Отвечай по-русски, кратко и по делу.",
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: prompt,
+            },
+            {
+              type: "image_url",
+              image_url: {
+                url: `data:image/jpeg;base64,${base64Image}`,
+              },
+            },
+          ],
+        },
+      ],
+    }),
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(
+      `Yandex multimodal API failed: ${response.status} ${JSON.stringify(data).slice(0, 1200)}`
+    );
+  }
+
+  const answer = data?.choices?.[0]?.message?.content;
+
+  if (!answer) {
+    throw new Error("Yandex multimodal API returned empty answer");
+  }
+
+  return cleanTelegramText(String(answer).slice(0, 3900));
+}
+
+async function searchSimilarImages(base64Image: string) {
+  const apiKey = process.env.YANDEX_SEARCH_API_KEY;
+  const folderId = process.env.YANDEX_FOLDER_ID;
+
+  if (!apiKey) throw new Error("YANDEX_SEARCH_API_KEY is missing");
+  if (!folderId) throw new Error("YANDEX_FOLDER_ID is missing");
+
+  const response = await fetch(YANDEX_IMAGE_BY_IMAGE_API, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Api-Key ${apiKey}`,
+    },
+    body: JSON.stringify({
+      folderId,
+      data: base64Image,
+      page: "0",
+      familyMode: "FAMILY_MODE_STRICT",
+    }),
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(
+      `Yandex image-by-image search failed: ${response.status} ${JSON.stringify(data).slice(0, 1200)}`
+    );
+  }
+
+  const images = Array.isArray(data?.images) ? data.images : [];
+
+  return images
+    .filter((item: { url?: string }) => /^https?:\/\//i.test(item?.url || ""))
+    .slice(0, 8)
+    .map((item: { url: string; pageTitle?: string; pageUrl?: string }) => ({
+      url: item.url,
+      title: item.pageTitle || "",
+      pageUrl: item.pageUrl || "",
+    }));
+}
+
+function decodeXmlEntities(value: string) {
+  return value
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
+}
+
+async function searchImagesByText(queryText: string) {
+  const apiKey = process.env.YANDEX_SEARCH_API_KEY;
+  const folderId = process.env.YANDEX_FOLDER_ID;
+
+  if (!apiKey) throw new Error("YANDEX_SEARCH_API_KEY is missing");
+  if (!folderId) throw new Error("YANDEX_FOLDER_ID is missing");
+
+  const response = await fetch(YANDEX_IMAGE_SEARCH_API, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Api-Key ${apiKey}`,
+    },
+    body: JSON.stringify({
+      query: {
+        searchType: "SEARCH_TYPE_RU",
+        queryText,
+        familyMode: "FAMILY_MODE_STRICT",
+        page: "0",
+        fixTypoMode: "FIX_TYPO_MODE_ON",
+      },
+      docsOnPage: "12",
+      folderId,
+      userAgent:
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148",
+    }),
+  });
+
+  const data = await response.json();
+
+  if (!response.ok || !data?.rawData) {
+    throw new Error(
+      `Yandex image search failed: ${response.status} ${JSON.stringify(data).slice(0, 1200)}`
+    );
+  }
+
+  const xml = Buffer.from(String(data.rawData), "base64").toString("utf8");
+  const tagUrls = Array.from(
+    xml.matchAll(/<url[^>]*>([\s\S]*?)<\/url>/gi),
+    (match) => decodeXmlEntities(match[1].trim())
+  );
+  const rawUrls = Array.from(
+    xml.matchAll(/https?:\/\/[^\s<>"']+/gi),
+    (match) => decodeXmlEntities(match[0])
+  );
+
+  return Array.from(new Set([...tagUrls, ...rawUrls]))
+    .filter((url) => /^https?:\/\//i.test(url))
+    .slice(0, 40);
+}
+
 async function searchWeb(queryText: string) {
   const apiKey = process.env.YANDEX_SEARCH_API_KEY;
   const folderId = process.env.YANDEX_FOLDER_ID;
@@ -739,6 +974,55 @@ async function sendTelegramMessage(
   if (!response.ok) {
     throw new Error(`Telegram sendMessage failed: ${response.status}`);
   }
+}
+
+async function sendTelegramPhotoByUrl(
+  chatId: number,
+  photoUrl: string,
+  caption?: string
+) {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token) throw new Error("TELEGRAM_BOT_TOKEN is missing");
+
+  const response = await fetch(`${TELEGRAM_API}/bot${token}/sendPhoto`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      photo: photoUrl,
+      ...(caption ? { caption: cleanTelegramText(caption).slice(0, 900) } : {}),
+    }),
+  });
+
+  return response.ok;
+}
+
+async function sendImageResults(
+  chatId: number,
+  queryText: string,
+  candidates: Array<string | { url: string; title?: string; pageUrl?: string }>
+) {
+  let sent = 0;
+
+  for (const candidate of candidates) {
+    if (sent >= 3) break;
+
+    const url = typeof candidate === "string" ? candidate : candidate.url;
+    const title = typeof candidate === "string" ? "" : candidate.title || "";
+    const caption =
+      sent === 0
+        ? `Аня, нашёл изображения по запросу «${queryText}».${title ? `\n${title}` : ""}`
+        : title;
+
+    try {
+      const ok = await sendTelegramPhotoByUrl(chatId, url, caption || undefined);
+      if (ok) sent += 1;
+    } catch (error) {
+      console.error("Could not send image result", error);
+    }
+  }
+
+  return sent;
 }
 
 async function configureWebhookSecret() {
@@ -879,9 +1163,13 @@ export async function POST(request: Request) {
   }
 
   const chatId = update.message?.chat?.id;
-  const text = update.message?.text?.trim();
+  const text =
+    update.message?.text?.trim() || update.message?.caption?.trim() || "";
+  const photos = Array.isArray(update.message?.photo)
+    ? update.message.photo
+    : [];
 
-  if (!chatId || !text) {
+  if (!chatId || (!text && photos.length === 0)) {
     return Response.json({ ok: true });
   }
 
@@ -942,8 +1230,86 @@ export async function POST(request: Request) {
   }
 
   try {
-    await sendTelegramMessage(chatId, "Принял. Думаю...");
     const history = await loadHistory(chatId);
+
+    if (photos.length > 0) {
+      await sendTelegramMessage(chatId, "Смотрю изображение...");
+
+      const photo = photos[photos.length - 1];
+      const fileId = photo?.file_id;
+
+      if (!fileId) {
+        throw new Error("Telegram photo file_id is missing");
+      }
+
+      const base64Image = await downloadTelegramPhotoBase64(fileId);
+
+      if (wantsSimilarImages(text)) {
+        const images = await searchSimilarImages(base64Image);
+        const sent = await sendImageResults(
+          chatId,
+          "похожие на присланное фото",
+          images
+        );
+
+        if (sent === 0) {
+          await sendTelegramMessage(
+            chatId,
+            "Аня, похожие изображения нашёл, но Telegram не смог загрузить результаты. Попробуй ещё раз чуть позже."
+          );
+        } else {
+          await saveExchange(
+            chatId,
+            text || "[Фото: поиск похожих изображений]",
+            `Нашёл и отправил ${sent} похожих изображения.`
+          );
+        }
+
+        return Response.json({ ok: true });
+      }
+
+      const answer = await analyzeTelegramPhoto(base64Image, text);
+      await sendTelegramMessage(chatId, answer);
+      await saveExchange(
+        chatId,
+        text || "[Фото без подписи]",
+        `Анализ изображения: ${answer}`
+      );
+      return Response.json({ ok: true });
+    }
+
+    if (isImageSearchQuery(text)) {
+      const imageQuery = normalizeImageSearchQuery(text);
+
+      if (!imageQuery) {
+        await sendTelegramMessage(
+          chatId,
+          "Аня, напиши, какие именно изображения найти. Например: «Найди картинки современной ванной в бежевых тонах»."
+        );
+        return Response.json({ ok: true });
+      }
+
+      await sendTelegramMessage(chatId, "Ищу изображения...");
+      const candidates = await searchImagesByText(imageQuery);
+      const sent = await sendImageResults(chatId, imageQuery, candidates);
+
+      if (sent === 0) {
+        await sendTelegramMessage(
+          chatId,
+          "Аня, поиск сработал, но подходящие изображения не удалось отправить в Telegram. Попробуй сформулировать запрос чуть иначе."
+        );
+      } else {
+        await saveExchange(
+          chatId,
+          text,
+          `Нашёл и отправил ${sent} изображения по запросу «${imageQuery}».`
+        );
+      }
+
+      return Response.json({ ok: true });
+    }
+
+    await sendTelegramMessage(chatId, "Принял. Думаю...");
 
     if (isNavigationQuery(text)) {
       const navigation = await buildNavigatorRoute(text);
