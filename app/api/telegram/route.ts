@@ -1,5 +1,6 @@
 import { createClient } from "redis";
 import { formatExpenseOverview } from "@/app/lib/expense-control";
+import { getYandexBillingSummary } from "@/app/lib/yandex-billing";
 
 export const runtime = "nodejs";
 
@@ -1899,7 +1900,21 @@ export async function POST(request: Request) {
   }
 
   if (text === "/expenses") {
-    await sendTelegramMessage(chatId, formatExpenseOverview());
+    let yandexBilling = null;
+
+    try {
+      yandexBilling = await getYandexBillingSummary();
+    } catch (error) {
+      console.error(
+        "Could not read Yandex Billing",
+        error instanceof Error ? error.message : "unknown error"
+      );
+    }
+
+    await sendTelegramMessage(
+      chatId,
+      formatExpenseOverview(new Date(), yandexBilling)
+    );
     return Response.json({ ok: true });
   }
 

@@ -81,7 +81,15 @@ function isOnOrBefore(left: string, right: string) {
   return left <= right;
 }
 
-export function formatExpenseOverview(date = new Date()) {
+export function formatExpenseOverview(
+  date = new Date(),
+  yandexBilling?: {
+    currency: string;
+    cost: number;
+    expense: number;
+    services: Array<{ name: string; cost: number; expense: number }>;
+  } | null
+) {
   const today = krasnoyarskDateKey(date);
   const browsecDue = nextMonthlyDate(28, date);
   const browsecReminder = shiftDateKey(browsecDue, -3);
@@ -101,12 +109,30 @@ export function formatExpenseOverview(date = new Date()) {
         "актуальный статус продления нужно перепроверить перед следующим платежом",
       ];
 
+  const yandexLines = yandexBilling
+    ? [
+        `фактические расходы за месяц: ${yandexBilling.expense.toFixed(2).replace(".", ",")} ${yandexBilling.currency}`,
+        `стоимость до скидок и грантов: ${yandexBilling.cost.toFixed(2).replace(".", ",")} ${yandexBilling.currency}`,
+        ...(yandexBilling.services.length > 0
+          ? [
+              "по сервисам:",
+              ...yandexBilling.services.slice(0, 6).map(
+                (service) =>
+                  `- ${service.name}: ${service.expense.toFixed(2).replace(".", ",")} ${yandexBilling.currency}`
+              ),
+            ]
+          : []),
+      ]
+    : [
+        "фактические расходы: временно не удалось получить из Billing API",
+      ];
+
   return [
     "Аня, контроль расходов по нашим сервисам:",
     "",
     "Yandex Cloud",
     "бюджет: 500 ₽ в месяц",
-    "фактические расходы: подключаем к Billing API следующим шагом",
+    ...yandexLines,
     "за что платим: YandexGPT, поиск, OCR, SpeechKit и облачную инфраструктуру бота",
     "кабинет: https://console.yandex.cloud/billing",
     "",
@@ -130,8 +156,6 @@ export function formatExpenseOverview(date = new Date()) {
     "Redis",
     "отдельный платёж пока не подтверждён",
     "за что используем: краткосрочная память и служебная статистика бота",
-    "",
-    "Важно: Yandex Cloud пока показывает бюджет, а не живую сумму. Для полного контроля следующим шагом подключим его Billing API.",
   ].join("\n");
 }
 
