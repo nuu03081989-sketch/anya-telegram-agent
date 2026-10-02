@@ -1770,14 +1770,16 @@ async function askYandex(
   if (!apiKey) throw new Error("YANDEX_API_KEY is missing");
   if (!folderId) throw new Error("YANDEX_FOLDER_ID is missing");
 
-  const response = await fetch(YANDEX_API, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Api-Key ${apiKey}`,
-      "x-folder-id": folderId,
-    },
-    body: JSON.stringify({
+  const response = await fetchWithTimeout(
+    YANDEX_API,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Api-Key ${apiKey}`,
+        "x-folder-id": folderId,
+      },
+      body: JSON.stringify({
       model: `gpt://${folderId}/yandexgpt/latest`,
       temperature: 0.4,
       max_tokens: 1200,
@@ -1811,8 +1813,11 @@ async function askYandex(
           content: userText,
         },
       ],
-    }),
-  });
+      }),
+    },
+    MODEL_REQUEST_TIMEOUT_MS,
+    "MODEL_TIMEOUT"
+  );
 
   const data = await response.json();
 
