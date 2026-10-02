@@ -4,7 +4,7 @@ export const runtime = "nodejs";
 
 const TELEGRAM_API = "https://api.telegram.org";
 const YANDEX_API = "https://ai.api.cloud.yandex.net/v1/chat/completions";
-const YANDEX_SEARCH_API = "https://searchapi.api.cloud.yandex.net/v2/gen/search";
+const YANDEX_SEARCH_API = "https://searchapi.api.cloud.yandex.net/v2/web/search";
 const CBR_DAILY_URL = "https://www.cbr.ru/scripts/XML_daily.asp";
 const OPEN_METEO_GEOCODING = "https://geocoding-api.open-meteo.com/v1/search";
 const OPEN_METEO_FORECAST = "https://api.open-meteo.com/v1/forecast";
@@ -107,6 +107,24 @@ function queuedSearchWeb(queryText: string) {
   return task;
 }
 
+function decodeXmlEntities(value: string) {
+  return value
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
+}
+
+function stripWebSearchMarkup(value: string) {
+  return decodeXmlEntities(value)
+    .replace(/<!\\[CDATA\\[/g, "")
+    .replace(/\\]\\]>/g, "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\\s+/g, " ")
+    .trim();
+}
+
 async function searchWeb(queryText: string) {
   const apiKey = process.env.YANDEX_SEARCH_API_KEY;
   const folderId = process.env.YANDEX_FOLDER_ID;
@@ -121,50 +139,75 @@ async function searchWeb(queryText: string) {
       Authorization: `Api-Key ${apiKey}`,
     },
     body: JSON.stringify({
-      messages: [{ content: queryText, role: "ROLE_USER" }],
+      query: {
+        searchType: "SEARCH_TYPE_RU",
+        queryText,
+        familyMode: "FAMILY_MODE_STRICT",
+        page: "0",
+        fixTypoMode: "FIX_TYPO_MODE_ON",
+      },
+      groupSpec: {
+        groupMode: "GROUP_MODE_FLAT",
+        groupsOnPage: "8",
+        docsInGroup: "1",
+      },
+      maxPassages: "3",
+      region: "225",
+      l10n: "LOCALIZATION_RU",
       folderId,
-      fixMisspell: true,
-      getPartialResults: false,
+      responseFormat: "FORMAT_XML",
     }),
   });
 
   const data = await response.json();
-  if (!response.ok) {
+
+  if (!response.ok || !data?.rawData) {
     throw new Error(
-      `Yandex Search API failed: ${response.status} ${JSON.stringify(data)}`
+      `Yandex Search API failed: ${response.status} ${JSON.stringify(data).slice(0, 1200)}`
     );
   }
 
-  const result = Array.isArray(data) ? data[data.length - 1] : data;
-  const answer = result?.message?.content || "";
-  const sources = Array.isArray(result?.sources) ? result.sources : [];
+  const xml = Buffer.from(String(data.rawData), "base64").toString("utf8");
+  const docs = Array.from(xml.matchAll(/<doc[^>]*>([\\s\\S]*?)<\\/doc>/gi))
+    .slice(0, 8)
+    .map((match) => {
+      const block = match[1];
+      const title = block.match(/<title>([\\s\\S]*?)<\\/title>/i)?.[1] || "Источник";
+      const url = block.match(/<url>([\\s\\S]*?)<\\/url>/i)?.[1] || "";
+      const passages = Array.from(
+        block.matchAll(/<passage>([\\s\\S]*?)<\\/passage>/gi),
+        (m) => stripWebSearchMarkup(m[1])
+      ).filter(Boolean).slice(0, 3);
 
-  const sourceLines = sources
-    .filter((source: { url?: string }) => source?.url)
-    .slice(0, 6)
+      return {
+        title: stripWebSearchMarkup(title),
+        url: stripWebSearchMarkup(url),
+        snippet: passages.join(" "),
+      };
+    })
+    .filter((item) => /^https?:\\/\\//i.test(item.url));
+
+  if (docs.length === 0) {
+    throw new Error("Yandex Search API returned no usable web results");
+  }
+
+  return docs
     .map(
-      (source: { title?: string; url?: string }, index: number) =>
-        `${index + 1}. ${source.title || "Источник"}: ${source.url}`
+      (item, index) =>
+        `${index + 1}. ${item.title}\n${item.url}${item.snippet ? `\nФрагмент: ${item.snippet}` : ""}`
     )
-    .join("\n");
-
-  return [
-    answer ? String(answer) : "",
-    sourceLines ? `Источники:\n${sourceLines}` : "",
-  ]
-    .filter(Boolean)
     .join("\n\n")
-    .slice(0, 5000);
+    .slice(0, 3600);
 }
 
-async function searchMany(queries: string[], maxChars = 7000) {
+async function searchMany(queries: string[], maxChars = 5000) {
   const successful: string[] = [];
 
   for (let index = 0; index < queries.length; index += 1) {
     try {
       const value = await queuedSearchWeb(queries[index]);
       if (value) {
-        successful.push(`Запрос ${index + 1}:\n${value.slice(0, 3200)}`);
+        successful.push(`Запрос ${index + 1}:\n${value.slice(0, 2200)}`);
       }
     } catch (error) {
       console.error(`Morning brief search query ${index + 1} failed`, error);
@@ -668,7 +711,7 @@ async function buildMorningBrief() {
     .join("\n\n");
 
   const generatedBrief = await askYandexForBrief(
-    context.slice(0, 43000),
+    context.slice(0, 24000),
     previousBrief.slice(0, 3500)
   );
 
