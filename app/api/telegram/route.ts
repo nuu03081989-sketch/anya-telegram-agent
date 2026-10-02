@@ -1162,10 +1162,10 @@ async function searchImagesByText(queryText: string) {
 
 function stripWebSearchMarkup(value: string) {
   return decodeXmlEntities(value)
-    .replace(/<!\\[CDATA\\[/g, "")
-    .replace(/\\]\\]>/g, "")
+    .replace(/<!\[CDATA\[/g, "")
+    .replace(/\]\]>/g, "")
     .replace(/<[^>]+>/g, " ")
-    .replace(/\\s+/g, " ")
+    .replace(/\s+/g, " ")
     .trim();
 }
 
@@ -1212,14 +1212,14 @@ async function searchWeb(queryText: string) {
   }
 
   const xml = Buffer.from(String(data.rawData), "base64").toString("utf8");
-  const docs = Array.from(xml.matchAll(/<doc[^>]*>([\\s\\S]*?)<\\/doc>/gi))
+  const docs = Array.from(xml.matchAll(/<doc[^>]*>([\s\S]*?)<\/doc>/gi))
     .slice(0, 8)
     .map((match) => {
       const block = match[1];
-      const title = block.match(/<title>([\\s\\S]*?)<\\/title>/i)?.[1] || "Источник";
-      const url = block.match(/<url>([\\s\\S]*?)<\\/url>/i)?.[1] || "";
+      const title = block.match(/<title>([\s\S]*?)<\/title>/i)?.[1] || "Источник";
+      const url = block.match(/<url>([\s\S]*?)<\/url>/i)?.[1] || "";
       const passages = Array.from(
-        block.matchAll(/<passage>([\\s\\S]*?)<\\/passage>/gi),
+        block.matchAll(/<passage>([\s\S]*?)<\/passage>/gi),
         (m) => stripWebSearchMarkup(m[1])
       ).filter(Boolean).slice(0, 3);
 
@@ -1229,7 +1229,7 @@ async function searchWeb(queryText: string) {
         snippet: passages.join(" "),
       };
     })
-    .filter((item) => /^https?:\\/\\//i.test(item.url));
+    .filter((item) => /^https?:\/\//i.test(item.url));
 
   if (docs.length === 0) {
     throw new Error("Yandex Search API returned no usable web results");
