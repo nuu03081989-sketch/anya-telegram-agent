@@ -198,6 +198,11 @@ async function getSpeechKitUsage(chatId: number) {
   };
 }
 
+async function resetSpeechKitUsage(chatId: number) {
+  const redis = await getRedis();
+  await redis.del(speechKitUsageKey(chatId));
+}
+
 
 async function isDuplicateTelegramUpdate(updateId?: number) {
   if (!Number.isFinite(updateId)) return false;
@@ -1919,6 +1924,24 @@ export async function POST(request: Request) {
       await sendTelegramMessage(
         chatId,
         "Аня, сейчас не смог прочитать статистику SpeechKit из Redis. Попробуй ещё раз чуть позже."
+      );
+    }
+
+    return Response.json({ ok: true });
+  }
+
+  if (text === "/usage-reset") {
+    try {
+      await resetSpeechKitUsage(chatId);
+      await sendTelegramMessage(
+        chatId,
+        "Аня, статистику SpeechKit за текущий месяц обнулил. Следующее голосовое начнёт новый чистый счёт."
+      );
+    } catch (error) {
+      console.error("Could not reset SpeechKit usage", error);
+      await sendTelegramMessage(
+        chatId,
+        "Аня, статистику SpeechKit сейчас обнулить не получилось. Попробуй ещё раз чуть позже."
       );
     }
 
