@@ -1385,41 +1385,136 @@ function latestHistoryMessage(
   return "";
 }
 
-function contextualImageQueries(history: ChatMessage[]) {
-  const assistantContext = latestHistoryMessage(history, "assistant");
-  const userContext = latestHistoryMessage(history, "user");
+function extractContextListItems(content: string) {
+  const lineItems = content
+    .split("\n")
+    .map(
+      (line) =>
+        line.match(/^\s*(?:\d+[.)]|[-•])\s+(.+?)\s*$/)?.[1]?.trim() || ""
+    )
+    .filter(Boolean);
+
+  if (lineItems.length >= 2) {
+    return lineItems.slice(0, 5);
+  }
+
+  const inlineItems = Array.from(
+    content.matchAll(
+      /(?:^|\s)(\d+)[.)]\s*([^\n]+?)(?=(?:\s+\d+[.)]\s)|$)/g
+    ),
+    (match) => match[2].trim()
+  ).filter(Boolean);
+
+  return inlineItems.length >= 2 ? inlineItems.slice(0, 5) : [];
+}
+
+function isWardrobeImageContext(text: string) {
+  return /(?:гардероб|одежд|образ|лук|наряд|капсул|аутфит|вещ|стил.{0,12}одеж)/i.test(
+    text
+  );
+}
+
+function contextualImageQueries(
+  history: ChatMessage[],
+  requestText: string
+) {
+  let assistantContext = "";
+  let listItems: string[] = [];
+
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const message = history[index];
+    if (message?.role !== "assistant") continue;
+
+    const items = extractContextListItems(message.content);
+    if (items.length >= 2) {
+      assistantContext = message.content;
+      listItems = items;
+      break;
+    }
+  }
+
+  if (!assistantContext) {
+    assistantContext = latestHistoryMessage(history, "assistant");
+  }
 
   if (!assistantContext) return [];
 
-  const numberedItems = assistantContext
-    .split("\n")
-    .map((line) => line.match(/^\s*\d+[.)]\s+(.+)$/)?.[1]?.trim() || "")
-    .filter(Boolean)
-    .slice(0, 5);
+  const recentContext = [
+    requestText,
+    ...history.slice(-10).map((message) => message.content),
+  ].join("\n");
+  const wardrobeContext = isWardrobeImageContext(recentContext);
+
+  let userContext = "";
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const message = history[index];
+    if (message?.role !== "user") continue;
+
+    if (!wardrobeContext || isWardrobeImageContext(message.content)) {
+      userContext = message.content;
+      break;
+    }
+  }
+
+  if (!userContext) {
+    userContext = latestHistoryMessage(history, "user");
+  }
 
   const baseContext = userContext
     .replace(/\s+/g, " ")
-    .slice(0, 180)
+    .slice(0, 160)
     .trim();
 
-  if (numberedItems.length > 0) {
-    return numberedItems.map((item) =>
-      [baseContext, item]
+  if (listItems.length > 0) {
+    return listItems.map((item, index) => {
+      const wardrobePrefix = wardrobeContext
+        ? "женская одежда готовый образ гардероб сочетание цветов"
+        : "";
+
+      const query = [wardrobePrefix, item, baseContext]
         .filter(Boolean)
         .join(" ")
         .replace(/\s+/g, " ")
         .slice(0, 320)
-        .trim()
-    );
+        .trim();
+
+      const fallbackQuery = wardrobeContext
+        ? `женский образ одежда ${item} сочетание цветов`
+        : item;
+
+      return {
+        label: `Вариант ${index + 1}: ${item.slice(0, 90)}`,
+        query,
+        fallbackQuery,
+      };
+    });
   }
 
   const compactAssistant = assistantContext
     .replace(/\s+/g, " ")
-    .slice(0, 300)
+    .slice(0, 260)
+    .trim();
+  const wardrobePrefix = wardrobeContext
+    ? "женская одежда готовый образ гардероб"
+    : "";
+  const query = [wardrobePrefix, baseContext, compactAssistant]
+    .filter(Boolean)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .slice(0, 320)
     .trim();
 
-  return [[baseContext, compactAssistant].filter(Boolean).join(" ").trim()]
-    .filter(Boolean);
+  return query
+    ? [
+        {
+          label: "Фото по предыдущей подборке",
+          query,
+          fallbackQuery: wardrobeContext
+            ? `женская одежда образ ${compactAssistant}`.slice(0, 320)
+            : compactAssistant,
+        },
+      ]
+    : [];
 }
 
 function wantsSimilarImages(text: string) {
@@ -1581,26 +1676,31 @@ async function searchImagesByText(queryText: string) {
   if (!apiKey) throw new Error("YANDEX_SEARCH_API_KEY is missing");
   if (!folderId) throw new Error("YANDEX_FOLDER_ID is missing");
 
-  const response = await fetch(YANDEX_IMAGE_SEARCH_API, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Api-Key ${apiKey}`,
-    },
-    body: JSON.stringify({
-      query: {
-        searchType: "SEARCH_TYPE_RU",
-        queryText,
-        familyMode: "FAMILY_MODE_STRICT",
-        page: "0",
-        fixTypoMode: "FIX_TYPO_MODE_ON",
+  const response = await fetchWithTimeout(
+    YANDEX_IMAGE_SEARCH_API,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Api-Key ${apiKey}`,
       },
-      docsOnPage: "12",
-      folderId,
-      userAgent:
-        "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148",
-    }),
-  });
+      body: JSON.stringify({
+        query: {
+          searchType: "SEARCH_TYPE_RU",
+          queryText,
+          familyMode: "FAMILY_MODE_STRICT",
+          page: "0",
+          fixTypoMode: "FIX_TYPO_MODE_ON",
+        },
+        docsOnPage: "12",
+        folderId,
+        userAgent:
+          "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148",
+      }),
+    },
+    WEB_REQUEST_TIMEOUT_MS,
+    "IMAGE_SEARCH_TIMEOUT"
+  );
 
   const data = await response.json();
 
@@ -1815,7 +1915,7 @@ async function sendOneImageForQuery(
   candidates: Array<string | { url: string; title?: string; pageUrl?: string }>,
   caption: string
 ) {
-  for (const candidate of candidates.slice(0, 8)) {
+  for (const candidate of candidates.slice(0, 12)) {
     const url = typeof candidate === "string" ? candidate : candidate.url;
 
     try {
@@ -2328,7 +2428,7 @@ export async function POST(request: Request) {
       await sendTelegramMessage(chatId, "Ищу изображения...");
 
       if (isContextualImageRequest(text)) {
-        const queries = contextualImageQueries(history);
+        const queries = contextualImageQueries(history, text);
 
         if (queries.length === 0) {
           await sendTelegramMessage(
@@ -2338,29 +2438,45 @@ export async function POST(request: Request) {
           return Response.json({ ok: true });
         }
 
-        const searches = await Promise.allSettled(
-          queries.map((query) => searchImagesByText(query))
-        );
-
         let sent = 0;
+        const missing: string[] = [];
 
-        for (let index = 0; index < searches.length; index += 1) {
-          const result = searches[index];
-          if (result.status !== "fulfilled") continue;
+        for (const item of queries) {
+          let ok = false;
 
-          const label =
-            queries.length > 1
-              ? `Вариант ${index + 1}`
-              : "Фото по предыдущей подборке";
+          try {
+            const candidates = await searchImagesByText(item.query);
+            ok = await sendOneImageForQuery(
+              chatId,
+              item.query,
+              candidates,
+              item.label
+            );
+          } catch (error) {
+            console.error("Contextual image search failed", error);
+          }
 
-          const ok = await sendOneImageForQuery(
-            chatId,
-            queries[index],
-            result.value,
-            label
-          );
+          if (!ok && item.fallbackQuery && item.fallbackQuery !== item.query) {
+            try {
+              const fallbackCandidates = await searchImagesByText(
+                item.fallbackQuery
+              );
+              ok = await sendOneImageForQuery(
+                chatId,
+                item.fallbackQuery,
+                fallbackCandidates,
+                item.label
+              );
+            } catch (error) {
+              console.error("Contextual image fallback failed", error);
+            }
+          }
 
-          if (ok) sent += 1;
+          if (ok) {
+            sent += 1;
+          } else {
+            missing.push(item.label);
+          }
         }
 
         if (sent === 0) {
@@ -2368,11 +2484,22 @@ export async function POST(request: Request) {
             chatId,
             "Аня, запрос понял правильно, но сами картинки Telegram сейчас не смог загрузить. Попробуй ещё раз чуть позже."
           );
-        } else {
+        } else if (missing.length > 0) {
+          await sendTelegramMessage(
+            chatId,
+            `Аня, отправил ${sent} из ${queries.length} вариантов. Не удалось загрузить: ${missing.join("; ")}. Я не считаю такую подборку полностью выполненной.`
+          );
           await saveExchange(
             chatId,
             text,
-            `По предыдущей подборке нашёл и отправил ${sent} фото.`
+            `По предыдущей подборке отправил ${sent} из ${queries.length} фото. Не удалось: ${missing.join("; ")}.`
+          );
+        } else {
+          const answer = `По предыдущей подборке отправил все ${sent} из ${queries.length} фото.`;
+          await saveExchange(chatId, text, answer);
+          await sendTelegramMessage(
+            chatId,
+            `Аня, готово: отправил все ${sent} из ${queries.length} вариантов.`
           );
         }
 
