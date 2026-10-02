@@ -195,16 +195,16 @@ async function getBillingAccount(iamToken: string) {
   };
 }
 
-function encodeVarint(input: number | bigint) {
-  let value = typeof input === "bigint" ? input : BigInt(Math.max(0, Math.floor(input)));
+function encodeVarint(input: number) {
+  let value = Math.max(0, Math.floor(input));
   const bytes: number[] = [];
 
-  while (value >= 0x80n) {
-    bytes.push(Number((value & 0x7fn) | 0x80n));
-    value >>= 7n;
+  while (value >= 128) {
+    bytes.push((value % 128) + 128);
+    value = Math.floor(value / 128);
   }
 
-  bytes.push(Number(value));
+  bytes.push(value);
   return Buffer.from(bytes);
 }
 
@@ -218,9 +218,8 @@ function encodeString(fieldNumber: number, value: string) {
 }
 
 function encodeTimestamp(date: Date) {
-  const seconds = BigInt(Math.floor(date.getTime() / 1000));
-  const field = Buffer.concat([encodeVarint(1 << 3), encodeVarint(seconds)]);
-  return field;
+  const seconds = Math.floor(date.getTime() / 1000);
+  return Buffer.concat([encodeVarint(1 << 3), encodeVarint(seconds)]);
 }
 
 function krasnoyarskDateParts(date = new Date()) {
@@ -263,25 +262,25 @@ function encodeUsageReportRequest(
 }
 
 type ProtoField =
-  | { field: number; wire: 0; value: bigint }
+  | { field: number; wire: 0; value: number }
   | { field: number; wire: 2; value: Buffer };
 
 function readVarint(buffer: Buffer, start: number) {
   let offset = start;
-  let shift = 0n;
-  let value = 0n;
+  let shift = 0;
+  let value = 0;
 
   while (offset < buffer.length) {
     const byte = buffer[offset];
-    value |= BigInt(byte & 0x7f) << shift;
+    value += (byte & 0x7f) * 2 ** shift;
     offset += 1;
 
     if ((byte & 0x80) === 0) {
       return { value, offset };
     }
 
-    shift += 7n;
-    if (shift > 70n) throw new Error("Invalid protobuf varint");
+    shift += 7;
+    if (shift > 49) throw new Error("Invalid protobuf varint");
   }
 
   throw new Error("Unexpected end of protobuf varint");
@@ -295,8 +294,8 @@ function decodeFields(buffer: Buffer): ProtoField[] {
     const tag = readVarint(buffer, offset);
     offset = tag.offset;
 
-    const field = Number(tag.value >> 3n);
-    const wire = Number(tag.value & 7n);
+    const field = Math.floor(tag.value / 8);
+    const wire = tag.value % 8;
 
     if (wire === 0) {
       const value = readVarint(buffer, offset);
@@ -398,7 +397,7 @@ function parseServiceUsageResponse(
   return {
     currency:
       currencyField && currencyField.wire === 0
-        ? currencyName(Number(currencyField.value), fallbackCurrency)
+        ? currencyName(currencyField.value, fallbackCurrency)
         : fallbackCurrency,
     cost:
       costField && costField.wire === 2 ? decimalMessage(costField.value) : 0,
