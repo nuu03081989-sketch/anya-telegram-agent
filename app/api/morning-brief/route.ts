@@ -62,9 +62,12 @@ function dailyPhrase(dateKey: string) {
 function cleanTelegramText(text: string) {
   return text
     .replace(/\*\*/g, "")
-    .replace(/^\s*\*\s+/gm, "- ")
+    .replace(/^\s*\\?\*\s+/gm, "- ")
+    .replace(/^\s*\\?-\s+/gm, "- ")
+    .replace(/\\([\-*_[\]()])/g, "$1")
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, "$2")
     .replace(/__/g, "")
-    .replace(/^#{1,6}\\s+/gm, "")
+    .replace(/^#{1,6}\s+/gm, "")
     .replace(/—/g, "-")
     .trim();
 }
@@ -374,6 +377,75 @@ function getSectionBody(text: string, heading: string, nextHeading: string) {
   return text.slice(bodyStart, end).trim();
 }
 
+function sectionHasVerifiedData(
+  text: string,
+  heading: string,
+  nextHeading: string
+) {
+  const body = getSectionBody(text, heading, nextHeading);
+  if (!body) return false;
+
+  return !/(подтверждённых свежих данных|подтверждённых свежих событий|свежие данные получить не удалось|нет данных)/i.test(
+    body
+  );
+}
+
+function rebuildTodayPriorities(text: string) {
+  const verified: string[] = [];
+
+  if (sectionHasVerifiedData(text, "Топливо", "Курсы")) {
+    verified.push("топливо и логистика");
+  }
+  if (
+    sectionHasVerifiedData(
+      text,
+      "Рынок стройматериалов и конкуренты",
+      "Спрос: стройка, ипотека, ремонт"
+    )
+  ) {
+    verified.push("рынок стройматериалов и конкуренты");
+  }
+  if (
+    sectionHasVerifiedData(
+      text,
+      "Спрос: стройка, ипотека, ремонт",
+      "Налоги, кадры и законодательство"
+    )
+  ) {
+    verified.push("спрос, стройка и ипотека");
+  }
+  if (
+    sectionHasVerifiedData(
+      text,
+      "Налоги, кадры и законодательство",
+      "Крупные государственные решения, влияющие на бизнес"
+    )
+  ) {
+    verified.push("налоги, кадры и законодательство");
+  }
+  if (
+    sectionHasVerifiedData(
+      text,
+      "Крупные государственные решения, влияющие на бизнес",
+      "Что изменилось со вчера"
+    )
+  ) {
+    verified.push("государственные решения");
+  }
+
+  const replacement =
+    verified.length > 0
+      ? "Сегодня подтверждены значимые данные по следующим направлениям: " +
+        verified.join(", ") +
+        ". Приоритеты формируй только по ним."
+      : "По ключевым бизнес-блокам подтверждённых свежих данных сегодня нет. Не придумываю приоритеты ради заполнения отчёта.";
+
+  const start = text.indexOf("Саня считает важным сегодня");
+  if (start < 0) return text;
+
+  return text.slice(0, start) + "Саня считает важным сегодня\n\n" + replacement;
+}
+
 function enforceFinalSourcePolicy(text: string) {
   const noData =
     "Подтверждённых свежих данных по этому блоку из подходящих источников не найдено.";
@@ -600,7 +672,8 @@ async function buildMorningBrief() {
     previousBrief.slice(0, 3500)
   );
 
-  const coreBrief = enforceFinalSourcePolicy(generatedBrief);
+  const verifiedBrief = enforceFinalSourcePolicy(generatedBrief);
+  const coreBrief = rebuildTodayPriorities(verifiedBrief);
 
   const brief = [
     coreBrief.trim(),
