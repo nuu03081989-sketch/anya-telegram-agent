@@ -128,6 +128,9 @@ type TelegramMessage = {
     text?: string;
     caption?: string;
   };
+  quote?: {
+    text?: string;
+  };
 };
 
 type TelegramUpdate = {
@@ -1397,26 +1400,34 @@ function latestHistoryMessage(
 }
 
 function extractContextListItems(content: string) {
-  const lineItems = content
+  const normalized = content
+    .replace(/\r/g, "\n")
+    .replace(/\u00a0/g, " ")
+    .trim();
+
+  const numberedItems = Array.from(
+    normalized.matchAll(
+      /(?:^|\n|\s)(\d+)[.)]\s*([\s\S]*?)(?=(?:\n|\s)\d+[.)]\s|$)/g
+    ),
+    (match) =>
+      match[2]
+        .replace(/\s+/g, " ")
+        .trim()
+  ).filter(Boolean);
+
+  if (numberedItems.length >= 2) {
+    return numberedItems.slice(0, 5);
+  }
+
+  const lineItems = normalized
     .split("\n")
     .map(
       (line) =>
-        line.match(/^\s*(?:\d+[.)]|[-•])\s+(.+?)\s*$/)?.[1]?.trim() || ""
+        line.match(/^\s*(?:[-•])\s+(.+?)\s*$/)?.[1]?.trim() || ""
     )
     .filter(Boolean);
 
-  if (lineItems.length >= 2) {
-    return lineItems.slice(0, 5);
-  }
-
-  const inlineItems = Array.from(
-    content.matchAll(
-      /(?:^|\s)(\d+)[.)]\s*([^\n]+?)(?=(?:\s+\d+[.)]\s)|$)/g
-    ),
-    (match) => match[2].trim()
-  ).filter(Boolean);
-
-  return inlineItems.length >= 2 ? inlineItems.slice(0, 5) : [];
+  return lineItems.length >= 2 ? lineItems.slice(0, 5) : [];
 }
 
 function isWardrobeImageContext(text: string) {
@@ -1447,15 +1458,17 @@ function contextualImageQueries(
   requestText: string,
   repliedText = ""
 ) {
-  let assistantContext = repliedText.trim();
-  let listItems = assistantContext
-    ? extractContextListItems(assistantContext)
-    : [];
+  const directContext = repliedText.trim();
+  let assistantContext = directContext;
+  let listItems = directContext ? extractContextListItems(directContext) : [];
 
-  if (listItems.length < 2) {
-    assistantContext = "";
-    listItems = [];
+  // If Telegram gave us a direct reply/quote, never substitute another old list
+  // from Redis. A wrong context is worse than an honest "не понял список".
+  if (directContext && listItems.length < 2) {
+    return [];
+  }
 
+  if (!directContext) {
     for (let index = history.length - 1; index >= 0; index -= 1) {
       const message = history[index];
       if (message?.role !== "assistant") continue;
@@ -1467,10 +1480,10 @@ function contextualImageQueries(
         break;
       }
     }
-  }
 
-  if (!assistantContext) {
-    assistantContext = repliedText.trim() || latestHistoryMessage(history, "assistant");
+    if (!assistantContext) {
+      assistantContext = latestHistoryMessage(history, "assistant");
+    }
   }
 
   if (!assistantContext) return [];
@@ -1480,6 +1493,7 @@ function contextualImageQueries(
     repliedText,
     ...history.slice(-10).map((message) => message.content),
   ].join("\n");
+
   const wardrobeContext = isWardrobeImageContext(recentContext);
   const moodboardContext =
     wardrobeContext &&
@@ -1536,10 +1550,13 @@ function contextualImageQueries(
     });
   }
 
+  if (directContext) return [];
+
   const compactAssistant = assistantContext
     .replace(/\s+/g, " ")
     .slice(0, 260)
     .trim();
+
   if (moodboardContext) {
     const moodboard = buildWardrobeMoodboardSearch(compactAssistant, 0);
     return [
@@ -1572,7 +1589,6 @@ function contextualImageQueries(
       ]
     : [];
 }
-
 function wantsSimilarImages(text: string) {
   return /(?:найди|покажи|поищи|подбери).*(?:похож|аналог).*(?:картин|изображен|фото)|(?:похож).*(?:картин|изображен|фото)/i.test(
     text
@@ -1969,14 +1985,20 @@ async function sendOneImageForQuery(
   chatId: number,
   queryText: string,
   candidates: Array<string | { url: string; title?: string; pageUrl?: string }>,
-  caption: string
+  caption: string,
+  usedUrls: Set<string>
 ) {
-  for (const candidate of candidates.slice(0, 12)) {
+  for (const candidate of candidates.slice(0, 20)) {
     const url = typeof candidate === "string" ? candidate : candidate.url;
+
+    if (!url || usedUrls.has(url)) continue;
 
     try {
       const ok = await sendTelegramPhotoByUrl(chatId, url, caption);
-      if (ok) return true;
+      if (ok) {
+        usedUrls.add(url);
+        return true;
+      }
     } catch (error) {
       console.error("Could not send contextual image result", error);
     }
@@ -2138,6 +2160,7 @@ export async function POST(request: Request) {
   const repliedText =
     update.message?.reply_to_message?.text?.trim() ||
     update.message?.reply_to_message?.caption?.trim() ||
+    update.message?.quote?.text?.trim() ||
     "";
 
   if (!chatId || (!text && photos.length === 0 && !document && !voice)) {
@@ -2500,36 +2523,35 @@ export async function POST(request: Request) {
 
         let sent = 0;
         const missing: string[] = [];
+        const usedUrls = new Set<string>();
 
         for (const item of queries) {
           let ok = false;
 
-          try {
-            const candidates = await searchImagesByText(item.query);
-            ok = await sendOneImageForQuery(
-              chatId,
+          const attempts = Array.from(
+            new Set([
               item.query,
-              candidates,
-              item.label
-            );
-          } catch (error) {
-            console.error("Contextual image search failed", error);
-          }
+              item.fallbackQuery,
+              `${item.query} editorial fashion collage`,
+              `${item.fallbackQuery} women outfit pinterest aesthetic`,
+            ].filter(Boolean))
+          );
 
-          if (!ok && item.fallbackQuery && item.fallbackQuery !== item.query) {
+          for (const attempt of attempts) {
             try {
-              const fallbackCandidates = await searchImagesByText(
-                item.fallbackQuery
-              );
+              const candidates = await searchImagesByText(attempt);
               ok = await sendOneImageForQuery(
                 chatId,
-                item.fallbackQuery,
-                fallbackCandidates,
-                item.label
+                attempt,
+                candidates,
+                item.label,
+                usedUrls
               );
             } catch (error) {
-              console.error("Contextual image fallback failed", error);
+              console.error("Contextual image search failed", error);
             }
+
+            if (ok) break;
           }
 
           if (ok) {
