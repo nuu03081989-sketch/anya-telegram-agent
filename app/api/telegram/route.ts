@@ -1341,7 +1341,21 @@ function isImageSearchQuery(text: string) {
   const normalized = text.trim();
   if (/^\/image\b/i.test(normalized)) return true;
 
-  return /(?:найди|покажи|подбери|поищи).*(?:картин|изображен|фото)/i.test(
+  return (
+    /(?:найди|покажи|подбери|поищи|пришли|отправь|дай).*(?:картин|изображен|фото)/i.test(
+      normalized
+    ) ||
+    /(?:мне\s+)?нужн\w*.*(?:картин|изображен|фото)/i.test(normalized) ||
+    /(?:картин|изображен|фото).*(?:этих|эти|этого|вариант|подбор|пример)/i.test(
+      normalized
+    )
+  );
+}
+
+function isContextualImageRequest(text: string) {
+  const normalized = text.toLowerCase();
+
+  return /(?:этих|эти|этого|таких|вариант|подбор|пример|выше|предыдущ)/i.test(
     normalized
   );
 }
@@ -1350,10 +1364,62 @@ function normalizeImageSearchQuery(text: string) {
   return text
     .replace(/^\/image\s*/i, "")
     .replace(
-      /^(?:саня[,\s]*)?(?:найди|покажи|подбери|поищи)\s+(?:мне\s+)?(?:картин\w*|изображени\w*|фото(?:графи\w*)?)\s*/i,
+      /^(?:саня[,\s]*)?(?:найди|покажи|подбери|поищи|пришли|отправь|дай)\s+(?:мне\s+)?(?:картин\w*|изображени\w*|фото(?:графи\w*)?)\s*/i,
+      ""
+    )
+    .replace(
+      /^(?:саня[,\s]*)?(?:мне\s+)?нужн\w*\s+(?:картин\w*|изображени\w*|фото(?:графи\w*)?)\s*/i,
       ""
     )
     .trim();
+}
+
+function latestHistoryMessage(
+  history: ChatMessage[],
+  role: ChatMessage["role"]
+) {
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    if (history[index]?.role === role) return history[index].content;
+  }
+
+  return "";
+}
+
+function contextualImageQueries(history: ChatMessage[]) {
+  const assistantContext = latestHistoryMessage(history, "assistant");
+  const userContext = latestHistoryMessage(history, "user");
+
+  if (!assistantContext) return [];
+
+  const numberedItems = assistantContext
+    .split("\n")
+    .map((line) => line.match(/^\s*\d+[.)]\s+(.+)$/)?.[1]?.trim() || "")
+    .filter(Boolean)
+    .slice(0, 5);
+
+  const baseContext = userContext
+    .replace(/\s+/g, " ")
+    .slice(0, 180)
+    .trim();
+
+  if (numberedItems.length > 0) {
+    return numberedItems.map((item) =>
+      [baseContext, item]
+        .filter(Boolean)
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .slice(0, 320)
+        .trim()
+    );
+  }
+
+  const compactAssistant = assistantContext
+    .replace(/\s+/g, " ")
+    .slice(0, 300)
+    .trim();
+
+  return [[baseContext, compactAssistant].filter(Boolean).join(" ").trim()]
+    .filter(Boolean);
 }
 
 function wantsSimilarImages(text: string) {
@@ -1741,6 +1807,26 @@ async function sendImageResults(
   }
 
   return sent;
+}
+
+async function sendOneImageForQuery(
+  chatId: number,
+  queryText: string,
+  candidates: Array<string | { url: string; title?: string; pageUrl?: string }>,
+  caption: string
+) {
+  for (const candidate of candidates.slice(0, 8)) {
+    const url = typeof candidate === "string" ? candidate : candidate.url;
+
+    try {
+      const ok = await sendTelegramPhotoByUrl(chatId, url, caption);
+      if (ok) return true;
+    } catch (error) {
+      console.error("Could not send contextual image result", error);
+    }
+  }
+
+  return false;
 }
 
 async function configureWebhookSecret() {
@@ -2239,6 +2325,60 @@ export async function POST(request: Request) {
     }
 
     if (isImageSearchQuery(text)) {
+      await sendTelegramMessage(chatId, "Ищу изображения...");
+
+      if (isContextualImageRequest(text)) {
+        const queries = contextualImageQueries(history);
+
+        if (queries.length === 0) {
+          await sendTelegramMessage(
+            chatId,
+            "Аня, я понял, что нужны фото предыдущих вариантов, но в памяти сейчас нет самого списка. Напиши одним сообщением, какие варианты показать."
+          );
+          return Response.json({ ok: true });
+        }
+
+        const searches = await Promise.allSettled(
+          queries.map((query) => searchImagesByText(query))
+        );
+
+        let sent = 0;
+
+        for (let index = 0; index < searches.length; index += 1) {
+          const result = searches[index];
+          if (result.status !== "fulfilled") continue;
+
+          const label =
+            queries.length > 1
+              ? `Вариант ${index + 1}`
+              : "Фото по предыдущей подборке";
+
+          const ok = await sendOneImageForQuery(
+            chatId,
+            queries[index],
+            result.value,
+            label
+          );
+
+          if (ok) sent += 1;
+        }
+
+        if (sent === 0) {
+          await sendTelegramMessage(
+            chatId,
+            "Аня, запрос понял правильно, но сами картинки Telegram сейчас не смог загрузить. Попробуй ещё раз чуть позже."
+          );
+        } else {
+          await saveExchange(
+            chatId,
+            text,
+            `По предыдущей подборке нашёл и отправил ${sent} фото.`
+          );
+        }
+
+        return Response.json({ ok: true });
+      }
+
       const imageQuery = normalizeImageSearchQuery(text);
 
       if (!imageQuery) {
@@ -2249,7 +2389,6 @@ export async function POST(request: Request) {
         return Response.json({ ok: true });
       }
 
-      await sendTelegramMessage(chatId, "Ищу изображения...");
       const candidates = await searchImagesByText(imageQuery);
       const sent = await sendImageResults(chatId, imageQuery, candidates);
 
