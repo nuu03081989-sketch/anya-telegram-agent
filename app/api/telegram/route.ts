@@ -732,15 +732,131 @@ async function extractDocumentText(
   }
 
   if (ext === "pdf" || mimeType === "application/pdf") {
-    // Import the parser implementation directly. The package root contains
-    // a debug entrypoint that can try to read its bundled test PDF in some
-    // serverless/Next.js runtimes.
+    // First try the embedded text layer. If the PDF is a scan, fall back to
+    // Yandex Vision OCR so photographed/scanned contracts and reports work too.
     const pdfParse = require("pdf-parse/lib/pdf-parse.js");
     const parsed = await pdfParse(bytes);
-    return String(parsed?.text || "");
+    const embeddedText = String(parsed?.text || "").trim();
+
+    if (embeddedText.replace(/\s+/g, " ").length >= 80) {
+      return embeddedText;
+    }
+
+    return recognizePdfWithYandexOcr(bytes);
   }
 
   throw new Error("UNSUPPORTED_DOCUMENT");
+}
+
+function extractOcrPageText(page: any) {
+  return String(
+    page?.result?.textAnnotation?.fullText ??
+      page?.result?.text_annotation?.full_text ??
+      page?.textAnnotation?.fullText ??
+      page?.text_annotation?.full_text ??
+      ""
+  ).trim();
+}
+
+async function recognizePdfWithYandexOcr(bytes: Buffer) {
+  if (bytes.length > 10 * 1024 * 1024) {
+    throw new Error("OCR_FILE_TOO_LARGE");
+  }
+
+  const apiKey =
+    process.env.YANDEX_VISION_API_KEY || process.env.YANDEX_API_KEY;
+  const folderId = process.env.YANDEX_FOLDER_ID;
+
+  if (!apiKey || !folderId) {
+    throw new Error("OCR_NOT_CONFIGURED");
+  }
+
+  const headers = {
+    "Content-Type": "application/json",
+    Authorization: `Api-Key ${apiKey}`,
+    "x-folder-id": folderId,
+  };
+
+  const startResponse = await fetch(
+    "https://ai.api.cloud.yandex.net/ocr/v1/recognizeTextAsync",
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        mimeType: "application/pdf",
+        languageCodes: ["*"],
+        model: "page",
+        content: bytes.toString("base64"),
+      }),
+    }
+  );
+
+  const startText = await startResponse.text();
+  let startData: any = {};
+
+  try {
+    startData = startText ? JSON.parse(startText) : {};
+  } catch {}
+
+  if (!startResponse.ok || !startData?.id) {
+    if (startResponse.status === 401 || startResponse.status === 403) {
+      throw new Error("OCR_PERMISSION_DENIED");
+    }
+
+    throw new Error(
+      `OCR_START_FAILED: ${startResponse.status} ${startText.slice(0, 800)}`
+    );
+  }
+
+  const operationId = String(startData.id);
+  const deadline = Date.now() + 70_000;
+
+  while (Date.now() < deadline) {
+    const resultResponse = await fetch(
+      `https://ai.api.cloud.yandex.net/ocr/v1/getRecognition?operationId=${encodeURIComponent(operationId)}`,
+      {
+        headers: {
+          Authorization: `Api-Key ${apiKey}`,
+          "x-folder-id": folderId,
+        },
+      }
+    );
+
+    const resultText = await resultResponse.text();
+
+    if (
+      resultResponse.status === 401 ||
+      resultResponse.status === 403
+    ) {
+      throw new Error("OCR_PERMISSION_DENIED");
+    }
+
+    if (resultResponse.ok && resultText.trim()) {
+      const pages = resultText
+        .trim()
+        .split(/\r?\n/)
+        .flatMap((line) => {
+          try {
+            return [JSON.parse(line)];
+          } catch {
+            return [];
+          }
+        });
+
+      const recognized = pages
+        .map((page) => extractOcrPageText(page))
+        .filter(Boolean)
+        .join("\n\n");
+
+      if (recognized.trim()) {
+        return recognized;
+      }
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+
+  throw new Error("OCR_TIMEOUT");
 }
 
 async function analyzeDocument(
@@ -1445,10 +1561,28 @@ export async function POST(request: Request) {
             chatId,
             "Аня, этот формат пока не читаю. Сейчас поддерживаю PDF, Word DOCX, Excel XLS/XLSX, CSV, TXT и Markdown."
           );
+        } else if (message.includes("OCR_FILE_TOO_LARGE")) {
+          await sendTelegramMessage(
+            chatId,
+            "Аня, этот сканированный PDF больше 10 МБ. Для OCR Yandex сейчас нужен файл до 10 МБ. Пришли более лёгкую версию или разбей PDF на части."
+          );
+        } else if (
+          message.includes("OCR_NOT_CONFIGURED") ||
+          message.includes("OCR_PERMISSION_DENIED")
+        ) {
+          await sendTelegramMessage(
+            chatId,
+            "Аня, сканированный PDF распознал как задачу для OCR, но доступ к Yandex Vision OCR ещё не настроен. Нужно добавить право ai.vision.user и ключ для Vision OCR."
+          );
+        } else if (message.includes("OCR_TIMEOUT")) {
+          await sendTelegramMessage(
+            chatId,
+            "Аня, OCR запустился, но не успел закончить распознавание за отведённое время. Попробуй ещё раз или пришли PDF меньшими частями."
+          );
         } else if (message.includes("DOCUMENT_HAS_NO_TEXT")) {
           await sendTelegramMessage(
             chatId,
-            "Аня, в файле не удалось извлечь текст. Если это сканированный PDF, для него отдельно подключим OCR."
+            "Аня, текст в документе не найден даже после извлечения. Попробуй прислать более чёткую копию."
           );
         } else {
           await sendTelegramMessage(
