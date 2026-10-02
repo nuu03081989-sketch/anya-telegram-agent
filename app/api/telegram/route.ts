@@ -1420,6 +1420,12 @@ function isWardrobeImageContext(text: string) {
   );
 }
 
+function isWardrobeMoodboardContext(text: string) {
+  return /(?:подбор|сочетан.{0,14}цвет|цветов.{0,14}сочетан|палитр|цветов.{0,10}гардероб|мудборд|moodboard|коллаж|pantone)/i.test(
+    text
+  );
+}
+
 function contextItemLabel(item: string, index: number) {
   const compact = item.replace(/\s+/g, " ").trim();
   const short =
@@ -1470,6 +1476,11 @@ function contextualImageQueries(
     ...history.slice(-10).map((message) => message.content),
   ].join("\n");
   const wardrobeContext = isWardrobeImageContext(recentContext);
+  const moodboardContext =
+    wardrobeContext &&
+    isWardrobeMoodboardContext(
+      [recentContext, assistantContext].filter(Boolean).join("\n")
+    );
 
   let userContext = "";
   for (let index = history.length - 1; index >= 0; index -= 1) {
@@ -1493,9 +1504,11 @@ function contextualImageQueries(
 
   if (listItems.length > 0) {
     return listItems.map((item, index) => {
-      const wardrobePrefix = wardrobeContext
-        ? "женская одежда готовый образ гардероб сочетание цветов"
-        : "";
+      const wardrobePrefix = moodboardContext
+        ? "fashion moodboard color palette outfit collage pinterest aesthetic pantone женская одежда"
+        : wardrobeContext
+          ? "женская одежда готовый образ гардероб сочетание цветов"
+          : "";
 
       const query = [wardrobePrefix, item, baseContext]
         .filter(Boolean)
@@ -1504,9 +1517,11 @@ function contextualImageQueries(
         .slice(0, 320)
         .trim();
 
-      const fallbackQuery = wardrobeContext
-        ? `женский образ одежда ${item} сочетание цветов`
-        : item;
+      const fallbackQuery = moodboardContext
+        ? `fashion color palette moodboard outfit collage ${item} pinterest`
+        : wardrobeContext
+          ? `женский образ одежда ${item} сочетание цветов`
+          : item;
 
       return {
         label: contextItemLabel(item, index),
@@ -1520,9 +1535,11 @@ function contextualImageQueries(
     .replace(/\s+/g, " ")
     .slice(0, 260)
     .trim();
-  const wardrobePrefix = wardrobeContext
-    ? "женская одежда готовый образ гардероб"
-    : "";
+  const wardrobePrefix = moodboardContext
+    ? "fashion moodboard color palette outfit collage pinterest aesthetic pantone женская одежда"
+    : wardrobeContext
+      ? "женская одежда готовый образ гардероб"
+      : "";
   const query = [wardrobePrefix, baseContext, compactAssistant]
     .filter(Boolean)
     .join(" ")
@@ -1535,9 +1552,11 @@ function contextualImageQueries(
         {
           label: "Фото по предыдущей подборке",
           query,
-          fallbackQuery: wardrobeContext
-            ? `женская одежда образ ${compactAssistant}`.slice(0, 320)
-            : compactAssistant,
+          fallbackQuery: moodboardContext
+            ? `fashion color palette moodboard outfit collage ${compactAssistant} pinterest`.slice(0, 320)
+            : wardrobeContext
+              ? `женская одежда образ ${compactAssistant}`.slice(0, 320)
+              : compactAssistant,
         },
       ]
     : [];
