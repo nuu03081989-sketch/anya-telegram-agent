@@ -1848,8 +1848,6 @@ export async function POST(request: Request) {
         return Response.json({ ok: true });
       }
 
-      await sendTelegramMessage(chatId, "Слушаю голосовое...");
-
       try {
         const bytes = await downloadTelegramVoice(voice.file_id);
         text = (await transcribeTelegramVoice(bytes)).trim();
