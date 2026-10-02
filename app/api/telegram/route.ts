@@ -19,6 +19,8 @@ const HISTORY_TTL_SECONDS = 60 * 60 * 24 * 14;
 const SPEECHKIT_ASYNC_RUB_PER_BILLED_SECOND = 0.0101;
 const SPEECHKIT_MIN_BILLED_SECONDS = 15;
 const SPEECHKIT_USAGE_TTL_SECONDS = 60 * 60 * 24 * 400;
+const WEB_REQUEST_TIMEOUT_MS = 20_000;
+const MODEL_REQUEST_TIMEOUT_MS = 30_000;
 
 const SYSTEM_PROMPT = [
   "Тебя зовут Саня. Ты мужчина и персональный ИИ-ассистент Ани. Помогай думать, организовывать, анализировать, искать решения и доводить задачи до результата.",
@@ -63,6 +65,7 @@ const SYSTEM_PROMPT = [
   "Проявляй инициативу: если видишь важный риск, упущение, очевидный следующий шаг или более сильное решение, коротко скажи об этом. Не усложняй простые задачи.",
   "Безопасность важна: никогда не проси присылать в чат токены, API-ключи, пароли и секретные URL. Перед удалением, оплатой и другими необратимыми действиями предупреждай о последствиях.",
   "В уведомлениях о платежах всегда указывай название сервиса, сумму, дату оплаты или списания, ссылку на оплату или управление подпиской и коротко объясняй, для чего мы за этот сервис платим.",
+  "Ты не продолжаешь обычные запросы в фоне. Никогда не говори, что ещё работаешь над старой задачей, что результат скоро придёт или что осталось немного подождать, если в текущем запросе у тебя нет реально запущенного фонового процесса. Если предыдущая задача не завершилась, скажи об этом прямо и предложи повторить её частями.",
   "Не используй конструкцию «это не x это y».",
   "Отвечай достаточно кратко, если Аня не просит подробностей.",
   "У тебя есть краткосрочная память последних сообщений этого Telegram-чата. Используй её, чтобы понимать контекст и не просить Аню повторять то, что уже было сказано недавно.",
@@ -322,14 +325,16 @@ async function extractNavigationDestination(userText: string) {
     throw new Error("Yandex credentials are missing for navigation");
   }
 
-  const response = await fetch(YANDEX_API, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Api-Key ${apiKey}`,
-      "x-folder-id": folderId,
-    },
-    body: JSON.stringify({
+  const response = await fetchWithTimeout(
+    YANDEX_API,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Api-Key ${apiKey}`,
+        "x-folder-id": folderId,
+      },
+      body: JSON.stringify({
       model: `gpt://${folderId}/yandexgpt-5-lite`,
       temperature: 0,
       max_tokens: 120,
@@ -344,8 +349,11 @@ async function extractNavigationDestination(userText: string) {
           content: userText,
         },
       ],
-    }),
-  });
+      }),
+    },
+    MODEL_REQUEST_TIMEOUT_MS,
+    "MODEL_TIMEOUT"
+  );
 
   const data = await response.json();
 
@@ -494,6 +502,33 @@ function shouldUseWebSearch(text: string) {
   return /(в интернете|в сети|поищи|найди|посмотри.*(?:интернет|сеть)|проверь.*(?:интернет|сеть)|сегодня|сейчас|текущ|актуальн|последн|новост|погода|прогноз|курс(?:ы| валют)?|котиров|цена|стоимость|расписан|результат матча|сч[её]т матча|наличи|отзывы|рейтинг|кто сейчас|работает ли|открыт ли|режим работы|контакт)/i.test(
     normalized
   );
+}
+
+async function fetchWithTimeout(
+  input: string | URL,
+  init: RequestInit,
+  timeoutMs: number,
+  timeoutCode: string
+) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    return await fetch(input, {
+      ...init,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (
+      controller.signal.aborted ||
+      (error instanceof Error && error.name === "AbortError")
+    ) {
+      throw new Error(timeoutCode);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 const CBR_DAILY_URL = "https://www.cbr.ru/scripts/XML_daily.asp";
@@ -1530,13 +1565,15 @@ async function searchWeb(queryText: string) {
   if (!apiKey) throw new Error("YANDEX_SEARCH_API_KEY is missing");
   if (!folderId) throw new Error("YANDEX_FOLDER_ID is missing");
 
-  const response = await fetch(YANDEX_SEARCH_API, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Api-Key ${apiKey}`,
-    },
-    body: JSON.stringify({
+  const response = await fetchWithTimeout(
+    YANDEX_SEARCH_API,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Api-Key ${apiKey}`,
+      },
+      body: JSON.stringify({
       query: {
         searchType: "SEARCH_TYPE_RU",
         queryText,
@@ -1553,9 +1590,12 @@ async function searchWeb(queryText: string) {
       region: "225",
       l10n: "LOCALIZATION_RU",
       folderId,
-      responseFormat: "FORMAT_XML",
-    }),
-  });
+        responseFormat: "FORMAT_XML",
+      }),
+    },
+    WEB_REQUEST_TIMEOUT_MS,
+    "WEB_SEARCH_TIMEOUT"
+  );
 
   const data = await response.json();
 
@@ -1730,14 +1770,16 @@ async function askYandex(
   if (!apiKey) throw new Error("YANDEX_API_KEY is missing");
   if (!folderId) throw new Error("YANDEX_FOLDER_ID is missing");
 
-  const response = await fetch(YANDEX_API, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Api-Key ${apiKey}`,
-      "x-folder-id": folderId,
-    },
-    body: JSON.stringify({
+  const response = await fetchWithTimeout(
+    YANDEX_API,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Api-Key ${apiKey}`,
+        "x-folder-id": folderId,
+      },
+      body: JSON.stringify({
       model: `gpt://${folderId}/yandexgpt/latest`,
       temperature: 0.4,
       max_tokens: 1200,
@@ -1771,8 +1813,11 @@ async function askYandex(
           content: userText,
         },
       ],
-    }),
-  });
+      }),
+    },
+    MODEL_REQUEST_TIMEOUT_MS,
+    "MODEL_TIMEOUT"
+  );
 
   const data = await response.json();
 
@@ -2214,7 +2259,7 @@ export async function POST(request: Request) {
       return Response.json({ ok: true });
     }
 
-    await sendTelegramMessage(chatId, "Принял. Думаю...");
+    await sendTelegramMessage(chatId, "Принял. Обрабатываю запрос...");
 
     if (isNavigationQuery(text)) {
       const navigation = await buildNavigatorRoute(text);
@@ -2280,10 +2325,22 @@ export async function POST(request: Request) {
     await saveExchange(chatId, text, answer);
   } catch (error) {
     console.error(error);
-    await sendTelegramMessage(
-      chatId,
-      "Не смог обработать запрос. Проверь настройки Yandex Cloud и попробуй ещё раз."
-    );
+    const message = String(error);
+
+    if (
+      message.includes("WEB_SEARCH_TIMEOUT") ||
+      message.includes("MODEL_TIMEOUT")
+    ) {
+      await sendTelegramMessage(
+        chatId,
+        "Аня, этот запрос не успел завершиться за отведённое время. Я не продолжаю его в фоне. Пришли задачу ещё раз, а если подборка большая, лучше разобьём её на части."
+      );
+    } else {
+      await sendTelegramMessage(
+        chatId,
+        "Не смог обработать запрос. Проверь настройки Yandex Cloud и попробуй ещё раз."
+      );
+    }
   }
 
   return Response.json({ ok: true });
