@@ -732,7 +732,10 @@ async function extractDocumentText(
   }
 
   if (ext === "pdf" || mimeType === "application/pdf") {
-    const pdfParse = require("pdf-parse");
+    // Import the parser implementation directly. The package root contains
+    // a debug entrypoint that can try to read its bundled test PDF in some
+    // serverless/Next.js runtimes.
+    const pdfParse = require("pdf-parse/lib/pdf-parse.js");
     const parsed = await pdfParse(bytes);
     return String(parsed?.text || "");
   }
