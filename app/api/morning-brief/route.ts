@@ -1,5 +1,6 @@
 import { createClient } from "redis";
 import { getExpenseReminders } from "@/app/lib/expense-control";
+import { getYandexBillingSummary } from "@/app/lib/yandex-billing";
 
 export const runtime = "nodejs";
 
@@ -113,6 +114,59 @@ async function sendExpenseReminders(chatId: number) {
       await redis.del(key);
       throw error;
     }
+  }
+}
+
+async function sendYandexBudgetAlert(chatId: number) {
+  const summary = await getYandexBillingSummary();
+  if (summary.currency !== "RUB") return;
+
+  const thresholds = [250, 400, 500];
+  const crossed = thresholds.filter(
+    (threshold) => summary.expense >= threshold
+  );
+
+  if (crossed.length === 0) return;
+
+  const threshold = crossed[crossed.length - 1];
+  const redis = await getRedis();
+  const alertKey =
+    `telegram:yandex-budget-alert:${summary.monthKey}:${threshold}`;
+
+  const reserved = await redis.set(alertKey, "1", {
+    NX: true,
+    EX: 60 * 60 * 24 * 60,
+  });
+
+  if (reserved !== "OK") return;
+
+  try {
+    const percent = Math.round((summary.expense / 500) * 100);
+    await sendTelegramMessage(
+      chatId,
+      [
+        `Аня, расходы Yandex Cloud за месяц достигли ${summary.expense.toFixed(2).replace(".", ",")} ₽ из бюджета 500 ₽ (${percent}%).`,
+        `Контрольный порог ${threshold} ₽ пройден.`,
+        "За что платим: YandexGPT, веб-поиск, OCR, SpeechKit и облачные функции бота.",
+        "Проверить расходы: https://console.yandex.cloud/billing",
+      ].join("\n")
+    );
+
+    const lowerThresholds = crossed.filter((value) => value < threshold);
+    if (lowerThresholds.length > 0) {
+      const multi = redis.multi();
+      for (const value of lowerThresholds) {
+        multi.set(
+          `telegram:yandex-budget-alert:${summary.monthKey}:${value}`,
+          "1",
+          { EX: 60 * 60 * 24 * 60 }
+        );
+      }
+      await multi.exec();
+    }
+  } catch (error) {
+    await redis.del(alertKey);
+    throw error;
   }
 }
 
@@ -820,6 +874,15 @@ export async function POST(request: Request) {
       await sendExpenseReminders(chatId);
     } catch (error) {
       console.error("Expense reminder failed", error);
+    }
+
+    try {
+      await sendYandexBudgetAlert(chatId);
+    } catch (error) {
+      console.error(
+        "Yandex budget alert failed",
+        error instanceof Error ? error.message : "unknown error"
+      );
     }
 
     return Response.json({ ok: true });
