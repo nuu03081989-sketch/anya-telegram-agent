@@ -933,9 +933,10 @@ async function searchWeb(queryText: string) {
 
 function cleanTelegramText(text: string) {
   return text
-    .replace(/\\*\\*/g, "")
+    .replace(/\*\*/g, "")
     .replace(/__/g, "")
-    .replace(/^#{1,6}\\s+/gm, "")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/^\s*\*\s+/gm, "")
     .trim();
 }
 
