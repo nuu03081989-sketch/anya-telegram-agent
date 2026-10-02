@@ -1,4 +1,5 @@
 import { createClient } from "redis";
+import { getExpenseReminders } from "@/app/lib/expense-control";
 
 export const runtime = "nodejs";
 
@@ -88,6 +89,30 @@ async function sendTelegramMessage(chatId: number, text: string) {
 
   if (!response.ok) {
     throw new Error(`Telegram sendMessage failed: ${response.status}`);
+  }
+}
+
+async function sendExpenseReminders(chatId: number) {
+  const reminders = getExpenseReminders();
+  if (reminders.length === 0) return;
+
+  const redis = await getRedis();
+
+  for (const reminder of reminders) {
+    const key = `telegram:expense-reminder:${reminder.id}:${reminder.dueDate}`;
+    const reserved = await redis.set(key, "1", {
+      NX: true,
+      EX: 60 * 60 * 24 * 45,
+    });
+
+    if (reserved !== "OK") continue;
+
+    try {
+      await sendTelegramMessage(chatId, reminder.message);
+    } catch (error) {
+      await redis.del(key);
+      throw error;
+    }
   }
 }
 
@@ -790,6 +815,12 @@ export async function POST(request: Request) {
     }
 
     await sendTelegramMessage(chatId, brief);
+
+    try {
+      await sendExpenseReminders(chatId);
+    } catch (error) {
+      console.error("Expense reminder failed", error);
+    }
 
     return Response.json({ ok: true });
   } catch (error) {
