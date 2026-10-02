@@ -14,6 +14,9 @@ const PUBLIC_APP_URL = "https://anya-telegram-agent.vercel.app";
 const HISTORY_STORE_LIMIT = 30;
 const HISTORY_CONTEXT_LIMIT = 16;
 const HISTORY_TTL_SECONDS = 60 * 60 * 24 * 14;
+const SPEECHKIT_ASYNC_RUB_PER_BILLED_SECOND = 0.0101;
+const SPEECHKIT_MIN_BILLED_SECONDS = 15;
+const SPEECHKIT_USAGE_TTL_SECONDS = 60 * 60 * 24 * 400;
 
 const SYSTEM_PROMPT = [
   "Тебя зовут Саня. Ты мужчина и персональный ИИ-ассистент Ани. Помогай думать, организовывать, анализировать, искать решения и доводить задачи до результата.",
@@ -131,6 +134,68 @@ async function getRedis() {
 
 function historyKey(chatId: number) {
   return `telegram:history:${chatId}`;
+}
+
+function speechKitMonthKey(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Krasnoyarsk",
+    year: "numeric",
+    month: "2-digit",
+  }).formatToParts(date);
+
+  const year = parts.find((part) => part.type === "year")?.value;
+  const month = parts.find((part) => part.type === "month")?.value;
+
+  return `${year || "0000"}-${month || "00"}`;
+}
+
+function speechKitUsageKey(chatId: number, month = speechKitMonthKey()) {
+  return `telegram:speechkit-usage:${chatId}:${month}`;
+}
+
+function speechKitBilledSeconds(durationSeconds: number) {
+  return Math.max(
+    SPEECHKIT_MIN_BILLED_SECONDS,
+    Math.ceil(Math.max(0, durationSeconds))
+  );
+}
+
+async function recordSpeechKitUsage(chatId: number, durationSeconds: number) {
+  try {
+    const redis = await getRedis();
+    const key = speechKitUsageKey(chatId);
+    const billedSeconds = speechKitBilledSeconds(durationSeconds);
+
+    await redis
+      .multi()
+      .hIncrBy(key, "requests", 1)
+      .hIncrBy(key, "audio_seconds", Math.ceil(Math.max(0, durationSeconds)))
+      .hIncrBy(key, "billed_seconds", billedSeconds)
+      .expire(key, SPEECHKIT_USAGE_TTL_SECONDS)
+      .exec();
+  } catch (error) {
+    console.error("Could not record SpeechKit usage", error);
+  }
+}
+
+async function getSpeechKitUsage(chatId: number) {
+  const redis = await getRedis();
+  const month = speechKitMonthKey();
+  const values = await redis.hGetAll(speechKitUsageKey(chatId, month));
+
+  const requests = Number(values.requests || 0);
+  const audioSeconds = Number(values.audio_seconds || 0);
+  const billedSeconds = Number(values.billed_seconds || 0);
+  const estimatedRub =
+    billedSeconds * SPEECHKIT_ASYNC_RUB_PER_BILLED_SECOND;
+
+  return {
+    month,
+    requests,
+    audioSeconds,
+    billedSeconds,
+    estimatedRub,
+  };
 }
 
 
@@ -1826,6 +1891,40 @@ export async function POST(request: Request) {
     return Response.json({ ok: true });
   }
 
+  if (text === "/usage") {
+    try {
+      const usage = await getSpeechKitUsage(chatId);
+      const audioMinutes = usage.audioSeconds / 60;
+      const billedMinutes = usage.billedSeconds / 60;
+      const monthLabel = new Intl.DateTimeFormat("ru-RU", {
+        timeZone: "Asia/Krasnoyarsk",
+        month: "long",
+        year: "numeric",
+      }).format(new Date());
+
+      await sendTelegramMessage(
+        chatId,
+        [
+          `Аня, SpeechKit за ${monthLabel}:`,
+          `голосовых: ${usage.requests}`,
+          `фактическая длительность: ${audioMinutes.toFixed(1).replace(".", ",")} мин`,
+          `тарифицируемая длительность: ${billedMinutes.toFixed(1).replace(".", ",")} мин`,
+          `примерная стоимость: ${usage.estimatedRub.toFixed(2).replace(".", ",")} ₽`,
+          "",
+          "Расчёт ориентировочный, по тарифу асинхронного SpeechKit v3, зафиксированному в коде на 02.10.2026.",
+        ].join("\n")
+      );
+    } catch (error) {
+      console.error("Could not read SpeechKit usage", error);
+      await sendTelegramMessage(
+        chatId,
+        "Аня, сейчас не смог прочитать статистику SpeechKit из Redis. Попробуй ещё раз чуть позже."
+      );
+    }
+
+    return Response.json({ ok: true });
+  }
+
   try {
     const history = await loadHistory(chatId);
 
@@ -1855,6 +1954,8 @@ export async function POST(request: Request) {
         if (!text) {
           throw new Error("SPEECHKIT_EMPTY_TRANSCRIPT");
         }
+
+        await recordSpeechKitUsage(chatId, duration);
       } catch (error) {
         console.error("Voice transcription failed", error);
         const message = String(error);
