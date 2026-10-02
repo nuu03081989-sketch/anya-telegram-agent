@@ -1,6 +1,10 @@
 import { createClient } from "redis";
 import { formatExpenseOverview } from "@/app/lib/expense-control";
 import { getYandexBillingSummary } from "@/app/lib/yandex-billing";
+import {
+  formatKrasnoyarskTraffic,
+  getKrasnoyarskTraffic,
+} from "@/app/lib/krasnoyarsk-traffic";
 
 export const runtime = "nodejs";
 
@@ -537,6 +541,12 @@ const OPEN_METEO_FORECAST = "https://api.open-meteo.com/v1/forecast";
 
 function isWeatherQuery(text: string) {
   return /(погод|температур|прогноз|дожд|снег|ветер|осадк|давлен|влажност)/i.test(
+    text
+  );
+}
+
+function isTrafficQuery(text: string) {
+  return /(пробк|затор|загруженност.{0,12}дорог|дорожн.{0,12}(?:обстанов|ситуац)|трафик.{0,12}(?:дорог|город)|как.{0,12}дорог|дорог.{0,12}загруж)/i.test(
     text
   );
 }
@@ -2254,6 +2264,45 @@ export async function POST(request: Request) {
           text,
           `Нашёл и отправил ${sent} изображения по запросу «${imageQuery}».`
         );
+      }
+
+      return Response.json({ ok: true });
+    }
+
+    if (isTrafficQuery(text)) {
+      await sendTelegramMessage(chatId, "Проверяю дорожную обстановку...");
+
+      try {
+        const traffic = await getKrasnoyarskTraffic();
+        const answer = formatKrasnoyarskTraffic(traffic);
+        await sendTelegramMessage(chatId, answer);
+        await saveExchange(chatId, text, answer);
+      } catch (error) {
+        console.error(
+          "Krasnoyarsk traffic failed",
+          error instanceof Error ? error.message : "unknown error"
+        );
+
+        const message = String(error);
+        let answer =
+          "Аня, сейчас не смог получить live-данные по дорогам Красноярска. Обычными ссылками вместо ответа отделываться не буду.";
+
+        if (message.includes("MAPBOX_ACCESS_TOKEN_MISSING")) {
+          answer += " В production не виден MAPBOX_ACCESS_TOKEN.";
+        } else if (
+          message.includes("MAPBOX_TRAFFIC_UNAUTHORIZED") ||
+          message.includes("MAPBOX_TRAFFIC_FORBIDDEN")
+        ) {
+          answer += " Mapbox не дал доступ к driving-traffic по текущему токену.";
+        } else if (message.includes("MAPBOX_TRAFFIC_RATE_LIMIT")) {
+          answer += " Mapbox временно ограничил число запросов.";
+        } else if (message.includes("MAPBOX_TRAFFIC_TIMEOUT")) {
+          answer += " Mapbox не успел ответить вовремя.";
+        } else {
+          answer += " Источник временно не ответил корректно.";
+        }
+
+        await sendTelegramMessage(chatId, answer);
       }
 
       return Response.json({ ok: true });
