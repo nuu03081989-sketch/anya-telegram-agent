@@ -4,13 +4,14 @@ export const runtime = "nodejs";
 
 const TELEGRAM_API = "https://api.telegram.org";
 const YANDEX_API = "https://ai.api.cloud.yandex.net/v1/chat/completions";
-const YANDEX_SEARCH_API = "https://searchapi.api.cloud.yandex.net/v2/gen/search";
+const YANDEX_SEARCH_API = "https://searchapi.api.cloud.yandex.net/v2/web/search";
 const YANDEX_IMAGE_SEARCH_API = "https://searchapi.api.cloud.yandex.net/v2/image/search";
 const YANDEX_IMAGE_BY_IMAGE_API = "https://searchapi.api.cloud.yandex.net/v2/image/search_by_image";
 const YANDEX_VISION_MODEL = "qwen3.6-35b-a3b";
 const WEBHOOK_URL = "https://anya-telegram-agent.vercel.app/api/telegram";
 const PUBLIC_APP_URL = "https://anya-telegram-agent.vercel.app";
-const HISTORY_LIMIT = 30;
+const HISTORY_STORE_LIMIT = 30;
+const HISTORY_CONTEXT_LIMIT = 16;
 const HISTORY_TTL_SECONDS = 60 * 60 * 24 * 14;
 
 const SYSTEM_PROMPT = [
@@ -140,7 +141,7 @@ async function isDuplicateTelegramUpdate(updateId?: number) {
 async function loadHistory(chatId: number): Promise<ChatMessage[]> {
   try {
     const redis = await getRedis();
-    const items = await redis.lRange(historyKey(chatId), -HISTORY_LIMIT, -1);
+    const items = await redis.lRange(historyKey(chatId), -HISTORY_CONTEXT_LIMIT, -1);
 
     return items.flatMap((item) => {
       try {
@@ -174,7 +175,7 @@ async function saveExchange(
       .multi()
       .rPush(key, JSON.stringify({ role: "user", content: userText }))
       .rPush(key, JSON.stringify({ role: "assistant", content: assistantText }))
-      .lTrim(key, -HISTORY_LIMIT, -1)
+      .lTrim(key, -HISTORY_STORE_LIMIT, -1)
       .expire(key, HISTORY_TTL_SECONDS)
       .exec();
   } catch (error) {
@@ -246,7 +247,7 @@ async function extractNavigationDestination(userText: string) {
       "x-folder-id": folderId,
     },
     body: JSON.stringify({
-      model: `gpt://${folderId}/yandexgpt/latest`,
+      model: `gpt://${folderId}/yandexgpt-5-lite`,
       temperature: 0,
       max_tokens: 120,
       messages: [
@@ -301,7 +302,7 @@ async function extractCoordinatesFromSearch(
       "x-folder-id": folderId,
     },
     body: JSON.stringify({
-      model: `gpt://${folderId}/yandexgpt/latest`,
+      model: `gpt://${folderId}/yandexgpt-5-lite`,
       temperature: 0,
       max_tokens: 120,
       messages: [
@@ -438,7 +439,7 @@ async function normalizeWeatherLocation(userText: string) {
       "x-folder-id": folderId,
     },
     body: JSON.stringify({
-      model: `gpt://${folderId}/yandexgpt/latest`,
+      model: `gpt://${folderId}/yandexgpt-5-lite`,
       temperature: 0,
       max_tokens: 80,
       messages: [
@@ -1159,6 +1160,15 @@ async function searchImagesByText(queryText: string) {
     .slice(0, 40);
 }
 
+function stripWebSearchMarkup(value: string) {
+  return decodeXmlEntities(value)
+    .replace(/<!\\[CDATA\\[/g, "")
+    .replace(/\\]\\]>/g, "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\\s+/g, " ")
+    .trim();
+}
+
 async function searchWeb(queryText: string) {
   const apiKey = process.env.YANDEX_SEARCH_API_KEY;
   const folderId = process.env.YANDEX_FOLDER_ID;
@@ -1173,58 +1183,65 @@ async function searchWeb(queryText: string) {
       Authorization: `Api-Key ${apiKey}`,
     },
     body: JSON.stringify({
-      messages: [
-        {
-          content: queryText,
-          role: "ROLE_USER",
-        },
-      ],
+      query: {
+        searchType: "SEARCH_TYPE_RU",
+        queryText,
+        familyMode: "FAMILY_MODE_STRICT",
+        page: "0",
+        fixTypoMode: "FIX_TYPO_MODE_ON",
+      },
+      groupSpec: {
+        groupMode: "GROUP_MODE_FLAT",
+        groupsOnPage: "8",
+        docsInGroup: "1",
+      },
+      maxPassages: "3",
+      region: "225",
+      l10n: "LOCALIZATION_RU",
       folderId,
-      fixMisspell: true,
-      getPartialResults: false,
+      responseFormat: "FORMAT_XML",
     }),
   });
 
   const data = await response.json();
 
-  if (!response.ok) {
+  if (!response.ok || !data?.rawData) {
     throw new Error(
-      `Yandex Search API failed: ${response.status} ${JSON.stringify(data)}`
+      `Yandex Search API failed: ${response.status} ${JSON.stringify(data).slice(0, 1200)}`
     );
   }
 
-  // Yandex GenSearch REST may return an array of responses even when
-  // getPartialResults=false. Support both the documented object shape and
-  // the array shape shown in Yandex's own examples.
-  const result = Array.isArray(data) ? data[data.length - 1] : data;
-  const searchAnswer = result?.message?.content;
-  const sources = Array.isArray(result?.sources) ? result.sources : [];
+  const xml = Buffer.from(String(data.rawData), "base64").toString("utf8");
+  const docs = Array.from(xml.matchAll(/<doc[^>]*>([\\s\\S]*?)<\\/doc>/gi))
+    .slice(0, 8)
+    .map((match) => {
+      const block = match[1];
+      const title = block.match(/<title>([\\s\\S]*?)<\\/title>/i)?.[1] || "Источник";
+      const url = block.match(/<url>([\\s\\S]*?)<\\/url>/i)?.[1] || "";
+      const passages = Array.from(
+        block.matchAll(/<passage>([\\s\\S]*?)<\\/passage>/gi),
+        (m) => stripWebSearchMarkup(m[1])
+      ).filter(Boolean).slice(0, 3);
 
-  if (!searchAnswer && sources.length === 0) {
-    throw new Error(
-      `Yandex Search API returned no answer and no sources: ${JSON.stringify(data).slice(0, 1200)}`
-    );
+      return {
+        title: stripWebSearchMarkup(title),
+        url: stripWebSearchMarkup(url),
+        snippet: passages.join(" "),
+      };
+    })
+    .filter((item) => /^https?:\\/\\//i.test(item.url));
+
+  if (docs.length === 0) {
+    throw new Error("Yandex Search API returned no usable web results");
   }
-
-  const sourceLines = sources
-    .filter((source: { url?: string; used?: boolean }) => source?.url)
-    .slice(0, 6)
-    .map(
-      (source: { title?: string; url?: string; used?: boolean }, index: number) =>
-        `${index + 1}. ${source.title || "Источник"}: ${source.url}${
-          source.used === false ? " (дополнительный)" : ""
-        }`
-    )
-    .join("\n");
 
   return [
-    "Поисковый ответ Yandex Search API:",
-    String(searchAnswer || "Готового поискового ответа нет."),
-    sourceLines ? `Источники:\n${sourceLines}` : "",
-  ]
-    .filter(Boolean)
-    .join("\n\n")
-    .slice(0, 16000);
+    "Результаты веб-поиска Yandex Search API:",
+    ...docs.map(
+      (item, index) =>
+        `${index + 1}. ${item.title}\n${item.url}${item.snippet ? `\nФрагмент: ${item.snippet}` : ""}`
+    ),
+  ].join("\n\n").slice(0, 12000);
 }
 
 function cleanTelegramText(text: string) {
