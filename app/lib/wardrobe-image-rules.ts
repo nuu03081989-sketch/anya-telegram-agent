@@ -1,5 +1,5 @@
 export const WARDROBE_MOODBOARD_SYSTEM_RULE =
-  "Если Аня просит визуальные подборки цветовых сочетаний для гардероба, приоритетный формат — Pinterest-style fashion moodboard: коллаж с 1–2 женскими образами или предметами одежды, цветовой палитрой/Pantone, аксессуарами и фактурами в тех же оттенках. В каждом результате должны читаться все основные цвета сочетания. Не подменяй гардеробную подборку интерьером, едой, цветами или абстрактной палитрой без одежды.";
+  "Если Аня явно просит мудборд, коллаж или палитру для гардероба, используй Pinterest-style fashion moodboard с женской одеждой, аксессуарами и фактурами. Если Аня просит просто фото вариантов/образов, приоритет — реальные женские комплекты одежды и street-style/editorial looks, а не интерьер, натюрморт или абстрактная палитра.";
 
 type ColorRule = {
   pattern: RegExp;
@@ -39,8 +39,10 @@ function compactText(value: string) {
 
 export function wardrobeCombinationTitle(item: string) {
   const compact = compactText(item);
+  const firstSentence = compact.split(/(?<=[.!?])\s+/)[0] || compact;
   const beforeExplanation =
-    compact.match(/^(.{2,90}?)(?::|\s[-–—]\s)/)?.[1]?.trim() || compact;
+    firstSentence.match(/^(.{2,90}?)(?::|\s[-–—]\s)/)?.[1]?.trim() ||
+    firstSentence;
 
   return beforeExplanation.replace(/[.;,]+$/g, "").trim().slice(0, 90);
 }
@@ -56,6 +58,45 @@ export function translateWardrobeColors(title: string) {
   }
 
   return Array.from(new Set(found));
+}
+
+export function buildWardrobeOutfitSearch(item: string, index: number) {
+  const title = wardrobeCombinationTitle(item);
+  const translated = translateWardrobeColors(item);
+  const colorPhrase =
+    translated.length >= 2 ? translated.join(" ") : compactText(title);
+  const detailPhrase = compactText(item).slice(0, 180);
+
+  const query = [
+    "women fashion outfit street style editorial full body clothing",
+    colorPhrase,
+    title,
+    detailPhrase,
+    "wearable look",
+  ]
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .slice(0, 320)
+    .trim();
+
+  const fallbackQuery = [
+    "women outfit clothing street style",
+    colorPhrase,
+    title,
+    "fashion look",
+  ]
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .slice(0, 320)
+    .trim();
+
+  return {
+    label: `Вариант ${index + 1}: ${title}`,
+    query,
+    fallbackQuery,
+    title,
+    colors: translated,
+  };
 }
 
 export function buildWardrobeMoodboardSearch(item: string, index: number) {

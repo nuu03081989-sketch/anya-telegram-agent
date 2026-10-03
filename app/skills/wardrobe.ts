@@ -1,4 +1,7 @@
-import { buildWardrobeMoodboardSearch } from "@/app/lib/wardrobe-image-rules";
+import {
+  buildWardrobeMoodboardSearch,
+  buildWardrobeOutfitSearch,
+} from "@/app/lib/wardrobe-image-rules";
 import { defineSkill } from "./types";
 import type { SkillContext, SkillResult } from "./types";
 
@@ -26,18 +29,21 @@ function extractContextListItems(content: string) {
     .replace(/\u00a0/g, " ")
     .trim();
 
+  const cleanItem = (value: string) =>
+    value
+      .split(/(?:Если хочешь|Источники:)/i)[0]
+      .replace(/\s+/g, " ")
+      .trim();
+
   const numberedItems = Array.from(
     normalized.matchAll(
       /(?:^|\n|\s)(\d+)[.)]\s*([\s\S]*?)(?=(?:\n|\s)\d+[.)]\s|$)/g
     ),
-    (match) =>
-      match[2]
-        .replace(/\s+/g, " ")
-        .trim()
+    (match) => cleanItem(match[2])
   ).filter(Boolean);
 
   if (numberedItems.length >= 2) {
-    return numberedItems.slice(0, 5);
+    return numberedItems.slice(0, 7);
   }
 
   const lineItems = normalized
@@ -48,7 +54,7 @@ function extractContextListItems(content: string) {
     )
     .filter(Boolean);
 
-  return lineItems.length >= 2 ? lineItems.slice(0, 5) : [];
+  return lineItems.length >= 2 ? lineItems.slice(0, 7) : [];
 }
 
 function latestHistoryMessage(
@@ -122,11 +128,8 @@ function buildWardrobeQueries(context: SkillContext) {
 
   if (!assistantContext) return [];
 
-  const fullContext = recentContext(context);
   const moodboardContext =
-    isWardrobeMoodboardContext(
-      [fullContext, assistantContext].filter(Boolean).join("\n")
-    );
+    isWardrobeMoodboardContext(context.text);
 
   let userContext = "";
   for (let index = history.length - 1; index >= 0; index -= 1) {
@@ -149,32 +152,14 @@ function buildWardrobeQueries(context: SkillContext) {
     .trim();
 
   if (listItems.length > 0) {
-    return listItems.map((item, index) => {
-      if (moodboardContext) {
-        return buildWardrobeMoodboardSearch(item, index);
-      }
-
-      const query = [
-        "женская одежда готовый образ гардероб сочетание цветов",
-        item,
-        baseContext,
-      ]
-        .filter(Boolean)
-        .join(" ")
-        .replace(/\s+/g, " ")
-        .slice(0, 320)
-        .trim();
-
-      return {
-        label: contextItemLabel(item, index),
-        query,
-        fallbackQuery:
-          `женский образ одежда ${item} сочетание цветов`
-            .replace(/\s+/g, " ")
-            .slice(0, 320)
-            .trim(),
-      };
-    });
+    return listItems.map((item, index) =>
+      moodboardContext
+        ? buildWardrobeMoodboardSearch(item, index)
+        : buildWardrobeOutfitSearch(
+            [item, baseContext].filter(Boolean).join(" "),
+            index
+          )
+    );
   }
 
   if (directContext) return [];
