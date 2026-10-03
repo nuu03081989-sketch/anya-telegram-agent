@@ -738,27 +738,34 @@ async function runProductFromPhoto(
 
   let identity: ProductIdentity;
 
-  try {
-    identity = await identifyProduct(context.imageBase64, context.text);
-  } catch (error) {
-    console.error(
-      "Structured product identification failed, retrying plain photo analysis",
-      error
+  if (context.imageDescription?.trim()) {
+    identity = looseIdentityFromText(
+      context.imageDescription,
+      context.text
     );
-
+  } else {
     try {
-      identity = await identifyProductPlain(
-        context.imageBase64,
-        context.text
+      identity = await identifyProduct(context.imageBase64, context.text);
+    } catch (error) {
+      console.error(
+        "Structured product identification failed, retrying plain photo analysis",
+        error
       );
-    } catch (retryError) {
-      console.error("Plain product identification failed", retryError);
 
-      return {
-        handled: true,
-        text:
-          "Аня, фото получил и понял, что нужно найти товар в продаже, но распознавание самого предмета сейчас не ответило даже со второй попытки. Поиск вслепую запускать не буду. Попробуй ещё раз чуть позже.",
-      };
+      try {
+        identity = await identifyProductPlain(
+          context.imageBase64,
+          context.text
+        );
+      } catch (retryError) {
+        console.error("Plain product identification failed", retryError);
+
+        return {
+          handled: true,
+          text:
+            "Аня, фото получил и понял, что нужно найти товар в продаже, но распознавание самого предмета сейчас не ответило даже со второй попытки. Поиск вслепую запускать не буду. Попробуй ещё раз чуть позже.",
+        };
+      }
     }
   }
 
