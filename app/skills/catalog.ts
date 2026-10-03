@@ -5,10 +5,12 @@ import { morningBriefSkill } from "./morning-brief";
 import { productFromPhotoSkill } from "./product-from-photo";
 import { researchSkill } from "./research";
 import { wardrobeSkill } from "./wardrobe";
+import { fashionTrendsSkill } from "./fashion-trends";
 import { defineSkill } from "./types";
 
 export const SKILLS = [
   wardrobeSkill,
+  fashionTrendsSkill,
   researchSkill,
   productFromPhotoSkill,
   documentAnalysisSkill,
