@@ -81,10 +81,44 @@ function extractJsonObject(raw: string) {
   const end = cleaned.lastIndexOf("}");
 
   if (start < 0 || end <= start) {
-    throw new Error("PRODUCT_PHOTO_BAD_JSON");
+    return null;
   }
 
-  return JSON.parse(cleaned.slice(start, end + 1));
+  try {
+    return JSON.parse(cleaned.slice(start, end + 1));
+  } catch {
+    return null;
+  }
+}
+
+function looseIdentityFromText(
+  raw: string,
+  userText: string
+): ProductIdentity {
+  const cleaned = cleanTelegramText(raw)
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!cleaned) {
+    throw new Error("PRODUCT_PHOTO_NO_IDENTITY");
+  }
+
+  const compact = cleaned.slice(0, 280);
+  const visibleText = Array.from(
+    compact.matchAll(/[«"“]([^»"”]{2,60})[»"”]/g),
+    (match) => String(match[1]).trim()
+  ).filter(Boolean).slice(0, 4);
+
+  return {
+    productName: compact,
+    brand: "",
+    model: "",
+    category: "",
+    visibleText,
+    visualDetails: [],
+    confidence: "low",
+    searchQueries: [],
+  };
 }
 
 export function isProductShoppingPhotoRequest(text: string) {
@@ -167,8 +201,15 @@ async function identifyProduct(
 
   const parsed = extractJsonObject(raw);
 
+  if (!parsed) {
+    console.warn("Product photo identify returned non-JSON, using text fallback");
+    return looseIdentityFromText(raw, userText);
+  }
+
   const productName = String(parsed?.productName || "").trim();
-  if (!productName) throw new Error("PRODUCT_PHOTO_NO_IDENTITY");
+  if (!productName) {
+    return looseIdentityFromText(raw, userText);
+  }
 
   return {
     productName,
@@ -176,17 +217,26 @@ async function identifyProduct(
     model: String(parsed?.model || "").trim(),
     category: String(parsed?.category || "").trim(),
     visibleText: Array.isArray(parsed?.visibleText)
-      ? parsed.visibleText.map((item: unknown) => String(item).trim()).filter(Boolean).slice(0, 6)
+      ? parsed.visibleText
+          .map((item: unknown) => String(item).trim())
+          .filter(Boolean)
+          .slice(0, 6)
       : [],
     visualDetails: Array.isArray(parsed?.visualDetails)
-      ? parsed.visualDetails.map((item: unknown) => String(item).trim()).filter(Boolean).slice(0, 6)
+      ? parsed.visualDetails
+          .map((item: unknown) => String(item).trim())
+          .filter(Boolean)
+          .slice(0, 6)
       : [],
     confidence:
       parsed?.confidence === "high" || parsed?.confidence === "low"
         ? parsed.confidence
         : "medium",
     searchQueries: Array.isArray(parsed?.searchQueries)
-      ? parsed.searchQueries.map((item: unknown) => String(item).trim()).filter(Boolean).slice(0, 3)
+      ? parsed.searchQueries
+          .map((item: unknown) => String(item).trim())
+          .filter(Boolean)
+          .slice(0, 3)
       : [],
   };
 }
@@ -328,6 +378,45 @@ function searchEvidence(hits: SearchHit[]) {
     .slice(0, 18_000);
 }
 
+function extractVisiblePrice(text: string) {
+  const match = text.match(
+    /(?:от\s*)?\d[\d\s]{1,8}(?:[.,]\d{1,2})?\s*(?:₽|руб\.?|р\.)/i
+  );
+
+  return match?.[0]?.replace(/\s+/g, " ").trim() || "";
+}
+
+function deterministicShoppingFallback(
+  identity: ProductIdentity,
+  hits: SearchHit[]
+) {
+  const lines = [
+    `Аня, на фото похоже на: ${identity.productName}.`,
+    identity.brand ? `Бренд/лицензия: ${identity.brand}.` : "",
+    `Уверенность распознавания: ${identity.confidence}.`,
+    "",
+    "Поиск нашёл такие варианты:",
+  ].filter(Boolean);
+
+  for (const hit of hits.slice(0, 5)) {
+    const price = extractVisiblePrice(`${hit.title} ${hit.snippet}`);
+    lines.push(
+      [
+        hit.title,
+        price ? `Цена в выдаче: ${price}` : "Цену в выдаче не вижу.",
+        hit.url,
+      ].join("\n")
+    );
+  }
+
+  lines.push(
+    "",
+    "Точное совпадение модели и наличие лучше проверить по ссылке перед покупкой."
+  );
+
+  return cleanTelegramText(lines.join("\n\n")).slice(0, 3900);
+}
+
 async function synthesizeShoppingAnswer(
   identity: ProductIdentity,
   userText: string,
@@ -434,10 +523,19 @@ async function runProductFromPhoto(
     };
   }
 
-  return {
-    handled: true,
-    text: await synthesizeShoppingAnswer(identity, context.text, hits),
-  };
+  try {
+    return {
+      handled: true,
+      text: await synthesizeShoppingAnswer(identity, context.text, hits),
+    };
+  } catch (error) {
+    console.error("Product photo synthesis failed, using deterministic fallback", error);
+
+    return {
+      handled: true,
+      text: deterministicShoppingFallback(identity, hits),
+    };
+  }
 }
 
 export const productFromPhotoSkill = defineSkill({
