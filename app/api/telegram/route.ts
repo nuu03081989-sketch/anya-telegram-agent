@@ -10,7 +10,9 @@ import { productFromPhotoSkill } from "@/app/skills/product-from-photo";
 import {
   documentAnalysisSkill,
   sanitizeDocumentMemory,
+  startDocumentBackgroundOcr,
 } from "@/app/skills/document-analysis";
+import { enqueueBackgroundOcrTask } from "@/app/lib/background-ocr";
 import { expenseControlSkill } from "@/app/skills/expense-control";
 import { navigationSkill } from "@/app/skills/navigation";
 import {
@@ -1914,6 +1916,36 @@ export async function POST(request: Request) {
 
       try {
         const bytes = await downloadTelegramFile(document.file_id);
+
+        if (process.env.OCR_BACKGROUND_ENABLED === "true") {
+          const operations = await startDocumentBackgroundOcr(
+            fileName,
+            mimeType,
+            bytes
+          );
+
+          if (operations && operations.length > 0) {
+            await enqueueBackgroundOcrTask({
+              chatId,
+              fileName,
+              userPrompt: text,
+              operations,
+            });
+
+            await sendTelegramMessage(
+              chatId,
+              operations.length > 1
+                ? `Аня, сканированный PDF подготовил и запустил OCR в фоне по ${operations.length} частям. Можешь пользоваться ботом дальше, результат пришлю отдельным сообщением.`
+                : "Аня, сканированный PDF подготовил и запустил OCR в фоне. Можешь пользоваться ботом дальше, результат пришлю отдельным сообщением."
+            );
+
+            return Response.json({
+              ok: true,
+              skill: "document-analysis",
+              backgroundOcr: true,
+            });
+          }
+        }
 
         if (
           (mimeType === "application/pdf" || /\.pdf$/i.test(fileName)) &&
