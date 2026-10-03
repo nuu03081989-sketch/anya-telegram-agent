@@ -32,6 +32,10 @@ export type SkillContext = {
   history?: readonly SkillMessage[];
   imageBase64?: string;
   imageDescription?: string;
+  documentBase64?: string;
+  documentFileName?: string;
+  documentMimeType?: string;
+  systemPrompt?: string;
 };
 
 export type SkillMatch = {

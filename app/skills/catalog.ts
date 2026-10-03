@@ -1,3 +1,4 @@
+import { documentAnalysisSkill } from "./document-analysis";
 import { productFromPhotoSkill } from "./product-from-photo";
 import { researchSkill } from "./research";
 import { defineSkill } from "./types";
@@ -15,16 +16,7 @@ export const SKILLS = [
   }),
   researchSkill,
   productFromPhotoSkill,
-  defineSkill({
-    id: "document-analysis",
-    title: "Анализ документов",
-    description:
-      "Чтение и анализ PDF, Word, Excel, CSV, TXT и сканов с OCR.",
-    status: "legacy",
-    costProfile: "existing-yandex-services",
-    triggerHints: ["проанализируй файл", "сделай выжимку", "сравни документы"],
-    dependencies: ["PDF parser", "Mammoth", "XLSX", "Yandex Vision"],
-  }),
+  documentAnalysisSkill,
   defineSkill({
     id: "expense-control",
     title: "Контроль расходов",
