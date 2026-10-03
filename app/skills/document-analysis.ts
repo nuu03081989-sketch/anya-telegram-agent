@@ -108,9 +108,12 @@ export async function getYandexPdfOcrResult(operationId: string) {
   }
 
   if (!resultResponse.ok) {
-    throw new Error(
-      `OCR_RESULT_FAILED: ${resultResponse.status} ${resultText.slice(0, 800)}`
+    console.warn(
+      "Yandex OCR result is not ready",
+      resultResponse.status,
+      resultText.slice(0, 300)
     );
+    return { done: false as const };
   }
 
   if (!resultText.trim()) {
