@@ -47,6 +47,9 @@ export type SkillMatch = {
 export type SkillResult = {
   handled: boolean;
   text?: string;
+  buttonUrl?: string;
+  buttonText?: string;
+  historyText?: string;
 };
 
 export type SkillHandler = {
