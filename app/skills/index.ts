@@ -1,3 +1,4 @@
+export { expenseControlSkill } from "./expense-control";
 export { documentAnalysisSkill, sanitizeDocumentMemory } from "./document-analysis";
 export { productFromPhotoSkill, isProductShoppingPhotoRequest } from "./product-from-photo";
 export { researchSkill, detectResearchMode, researchModeLabel } from "./research";
