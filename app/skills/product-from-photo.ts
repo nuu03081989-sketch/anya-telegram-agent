@@ -424,6 +424,106 @@ async function searchOne(queryText: string): Promise<SearchHit[]> {
     .filter((item) => /^https?:\/\//i.test(item.url));
 }
 
+function normalizedWords(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/ё/g, "е")
+    .replace(/[^a-zа-я0-9]+/gi, " ")
+    .split(/\s+/)
+    .map((word) => word.trim())
+    .filter((word) => word.length >= 3);
+}
+
+function distinctiveIdentityWords(identity: ProductIdentity) {
+  const strong = [
+    identity.brand,
+    identity.model,
+    ...identity.visibleText,
+  ]
+    .flatMap(normalizedWords)
+    .filter(
+      (word) =>
+        ![
+          "черный",
+          "черная",
+          "черное",
+          "белый",
+          "белая",
+          "пенал",
+          "товар",
+          "набор",
+          "фото",
+        ].includes(word)
+    );
+
+  const productWords = normalizedWords(identity.productName).filter(
+    (word) =>
+      ![
+        "вероятно",
+        "похоже",
+        "фотографии",
+        "черный",
+        "черная",
+        "овальный",
+        "пенал",
+        "лицензией",
+        "надписью",
+        "товар",
+      ].includes(word)
+  );
+
+  return {
+    strong: [...new Set(strong)],
+    product: [...new Set(productWords)],
+  };
+}
+
+function productMatchScore(identity: ProductIdentity, hit: SearchHit) {
+  const haystack = `${hit.title} ${hit.snippet} ${hit.url}`
+    .toLowerCase()
+    .replace(/ё/g, "е");
+  const words = distinctiveIdentityWords(identity);
+
+  const strongMatches = words.strong.filter((word) =>
+    haystack.includes(word)
+  ).length;
+  const productMatches = words.product.filter((word) =>
+    haystack.includes(word)
+  ).length;
+
+  let score = strongMatches * 4 + Math.min(productMatches, 4);
+
+  if (
+    identity.category &&
+    normalizedWords(identity.category).some((word) => haystack.includes(word))
+  ) {
+    score += 1;
+  }
+
+  return score;
+}
+
+function hasStrongProductAnchor(identity: ProductIdentity, hit: SearchHit) {
+  const words = distinctiveIdentityWords(identity);
+  if (words.strong.length === 0) {
+    return productMatchScore(identity, hit) >= 2;
+  }
+
+  const haystack = `${hit.title} ${hit.snippet} ${hit.url}`
+    .toLowerCase()
+    .replace(/ё/g, "е");
+
+  return words.strong.some((word) => haystack.includes(word));
+}
+
+function mentionsRequestedCity(userText: string, hit: SearchHit) {
+  if (!/красноярск/i.test(userText)) return false;
+
+  return /(?:красноярск|krasnoyarsk)/i.test(
+    `${hit.title} ${hit.snippet} ${hit.url}`
+  );
+}
+
 function dedupeHits(hits: SearchHit[]) {
   const seen = new Set<string>();
   const result: SearchHit[] = [];
@@ -437,7 +537,10 @@ function dedupeHits(hits: SearchHit[]) {
   return result.slice(0, 12);
 }
 
-async function collectHits(queries: string[]) {
+async function collectHits(
+  queries: string[],
+  identity: ProductIdentity
+) {
   const hits: SearchHit[] = [];
 
   for (let index = 0; index < queries.length; index += 1) {
@@ -452,15 +555,42 @@ async function collectHits(queries: string[]) {
     }
   }
 
-  return dedupeHits(hits);
+  return dedupeHits(hits)
+    .filter((hit) => hasStrongProductAnchor(identity, hit))
+    .sort(
+      (a, b) =>
+        productMatchScore(identity, b) - productMatchScore(identity, a)
+    )
+    .slice(0, 10);
 }
 
-function searchEvidence(hits: SearchHit[]) {
+function searchEvidence(
+  identity: ProductIdentity,
+  userText: string,
+  hits: SearchHit[]
+) {
   return hits
-    .map(
-      (hit, index) =>
-        `[${index + 1}] ${hit.title}\nURL: ${hit.url}\nФрагмент: ${hit.snippet || "нет фрагмента"}`
-    )
+    .map((hit, index) => {
+      const score = productMatchScore(identity, hit);
+      const price =
+        score >= 4 && hasStrongProductAnchor(identity, hit)
+          ? extractVisiblePrice(`${hit.title} ${hit.snippet}`)
+          : "";
+      const cityConfirmed = mentionsRequestedCity(userText, hit);
+
+      return [
+        `[${index + 1}] ${hit.title}`,
+        `URL: ${hit.url}`,
+        `Совпадение с фото: ${score >= 8 ? "сильное" : score >= 4 ? "среднее" : "слабое"}`,
+        /красноярск/i.test(userText)
+          ? `Красноярск явно подтверждён в выдаче: ${cityConfirmed ? "да" : "нет"}`
+          : "",
+        price ? `Цена, явно видимая в выдаче: ${price}` : "Подтверждённой цены в выдаче нет.",
+        `Фрагмент: ${hit.snippet || "нет фрагмента"}`,
+      ]
+        .filter(Boolean)
+        .join("\n");
+    })
     .join("\n\n")
     .slice(0, 18_000);
 }
@@ -475,6 +605,7 @@ function extractVisiblePrice(text: string) {
 
 function deterministicShoppingFallback(
   identity: ProductIdentity,
+  userText: string,
   hits: SearchHit[]
 ) {
   const lines = [
@@ -486,13 +617,29 @@ function deterministicShoppingFallback(
   ].filter(Boolean);
 
   for (const hit of hits.slice(0, 5)) {
-    const price = extractVisiblePrice(`${hit.title} ${hit.snippet}`);
+    const score = productMatchScore(identity, hit);
+    const price =
+      score >= 4 && hasStrongProductAnchor(identity, hit)
+        ? extractVisiblePrice(`${hit.title} ${hit.snippet}`)
+        : "";
+    const cityConfirmed = mentionsRequestedCity(userText, hit);
+
     lines.push(
       [
         hit.title,
-        price ? `Цена в выдаче: ${price}` : "Цену в выдаче не вижу.",
+        score >= 8
+          ? "Совпадение с фото: сильное."
+          : "Совпадение с фото: похожий вариант.",
+        price ? `Цена в выдаче: ${price}` : "Подтверждённой цены в выдаче нет.",
+        /красноярск/i.test(userText)
+          ? cityConfirmed
+            ? "Красноярск указан в выдаче."
+            : "Наличие или доставка в Красноярск по выдаче не подтверждены."
+          : "",
         hit.url,
-      ].join("\n")
+      ]
+        .filter(Boolean)
+        .join("\n")
     );
   }
 
@@ -535,9 +682,10 @@ async function synthesizeShoppingAnswer(
               "Ты Саня, персональный ассистент Ани. Нужно помочь найти товар с фотографии в продаже.",
               "Используй только распознавание и результаты поиска ниже. Не выдумывай магазин, цену, наличие, модель, артикул или доставку.",
               "Различай точное совпадение и похожий товар. Если точность не подтверждена, прямо пиши «похожий вариант».",
-              "Цена считается подтверждённой только если она явно есть в названии или фрагменте конкретного результата поиска.",
-              "Если цена не видна, пиши «цену в выдаче не вижу», а не оценивай её сам.",
-              "Если пользователь просит Красноярск, приоритет: наличие в Красноярске, затем доставка в Красноярск. Не утверждай наличие в городе без подтверждения.",
+              "Не используй цену из результата, который относится к другому товару, даже если он тоже является пеналом или похож по цвету.",
+              "Цена считается подтверждённой только если в блоке конкретного результата указана строка «Цена, явно видимая в выдаче». Иначе пиши, что подтверждённой цены нет.",
+              "Если пользователь просит Красноярск, не утверждай местное наличие или доставку, пока в блоке результата не указано «Красноярск явно подтверждён в выдаче: да».",
+              "Категорийная страница маркетплейса подтверждает только наличие похожих предложений на площадке, но не точную модель, цену или наличие в городе.",
               "Не выдавай агрегаторную страницу за магазин, если из результата это не ясно.",
               "Ответ короткий и практичный: что на фото; насколько уверен; где нашёл; цены; что лучше проверить перед покупкой.",
               "Для каждого варианта укажи URL обычным текстом.",
@@ -551,7 +699,7 @@ async function synthesizeShoppingAnswer(
               `Распознано: ${JSON.stringify(identity)}`,
               "",
               "РЕЗУЛЬТАТЫ ПОИСКА:",
-              searchEvidence(hits),
+              searchEvidence(identity, userText, hits),
             ].join("\n"),
           },
         ],
@@ -614,12 +762,17 @@ async function runProductFromPhoto(
     }
   }
 
-  const queries =
-    identity.searchQueries.length >= 2
-      ? identity.searchQueries.slice(0, 3)
-      : fallbackQueries(identity, context.text);
+  const queries = Array.from(
+    new Set([
+      ...fallbackQueries(identity, context.text).slice(0, 1),
+      ...identity.searchQueries,
+      ...fallbackQueries(identity, context.text).slice(1),
+    ])
+  )
+    .filter(Boolean)
+    .slice(0, 3);
 
-  const hits = await collectHits(queries);
+  const hits = await collectHits(queries, identity);
 
   if (hits.length === 0) {
     return {
@@ -645,7 +798,7 @@ async function runProductFromPhoto(
 
     return {
       handled: true,
-      text: deterministicShoppingFallback(identity, hits),
+      text: deterministicShoppingFallback(identity, context.text, hits),
     };
   }
 }
