@@ -854,11 +854,11 @@ function parseRussianEffectiveDates(text: string, todayKey: string) {
   return dates;
 }
 
-function hasOnlyStaleEffectiveDates(text: string, todayKey: string) {
+function hasStaleEffectiveDate(text: string, todayKey: string) {
   const dates = parseRussianEffectiveDates(text, todayKey);
   if (dates.length === 0) return false;
 
-  return dates.every((dateKey) => daysBetweenDateKeys(dateKey, todayKey) > 45);
+  return dates.some((dateKey) => daysBetweenDateKeys(dateKey, todayKey) > 30);
 }
 
 function hasBusinessTaxHrSignal(text: string) {
@@ -889,15 +889,34 @@ function sanitizeTaxHrSection(text: string) {
     "government.ru",
   ];
 
-  const kept = splitSectionIntoSourceSegments(body)
-    .filter(({ text: segment, url }) =>
-      urlMatchesAnyDomain(url, allowedDomains) &&
-      hasBusinessTaxHrSignal(segment) &&
-      !isClearlyIrrelevantTaxHrItem(segment) &&
-      !hasExpiredDeadline(segment, krasnoyarskDateKey()) &&
-      !hasOnlyStaleEffectiveDates(segment, krasnoyarskDateKey())
-    )
-    .map(({ text: segment }) => segment);
+  const todayKey = krasnoyarskDateKey();
+  const kept: string[] = [];
+
+  for (const { text: segment, url } of splitSectionIntoSourceSegments(body)) {
+    if (!urlMatchesAnyDomain(url, allowedDomains)) continue;
+
+    const sourceFree = segment
+      .replace(url, "")
+      .replace(/(?:Источник\s*:\s*)$/i, "")
+      .trim();
+
+    const sentences = sourceFree
+      .split(/(?<=[.!?])\s+/)
+      .map((sentence) => sentence.trim())
+      .filter(Boolean);
+
+    const freshSentences = sentences.filter(
+      (sentence) =>
+        hasBusinessTaxHrSignal(sentence) &&
+        !isClearlyIrrelevantTaxHrItem(sentence) &&
+        !hasExpiredDeadline(sentence, todayKey) &&
+        !hasStaleEffectiveDate(sentence, todayKey)
+    );
+
+    if (freshSentences.length > 0) {
+      kept.push(`${freshSentences.join(" ")} Источник: ${url}`);
+    }
+  }
 
   return replaceSectionBody(
     text,
@@ -1081,7 +1100,7 @@ async function askYandexForBrief(context: string, previousBrief: string) {
             "Для блока конкурентов используй только официальные источники: mela-rossa.ru, strukturasveta.ru, wowsvet.ru, afloor.pro, deartfloor.ru, mir-dekora.clients.site, elitkras.ru, kerama-marazzi.com и прямой официальный профиль Mela Rossa vk.com/melarossahome. Не используй Zoon, 2ГИС, каталоги, агрегаторы, чужие соцсети и VK-ссылки, по которым нельзя подтвердить принадлежность официальному аккаунту. Обычное описание деятельности, ассортимента или факт работы с дизайнерами не считай свежим событием.",
             "В блоке «Спрос: стройка, ипотека, ремонт» используй только свежие данные, способные повлиять на спрос ESTRO: ипотечные условия и ставки, выдачи ипотеки, ввод жилья, продажи новостроек, строительство и ремонт. Не включай условия программ, срок которых уже истёк на дату брифа. Данные за период старше двух календарных месяцев не выдавай за текущую ситуацию и не включай в ежедневный бриф.",
             "В блоке «Налоги, кадры и законодательство» включай только изменения, которые реально применимы к ESTRO как работодателю, торговой компании или продавцу/импортёру строительных и интерьерных материалов: НДС общего характера, налог на прибыль/имущество, ККТ, ЭДО, маркировка, импорт и пошлины, отчётность, трудовое право, кадровый и воинский учёт, зарплата, НДФЛ, страховые взносы, персональные данные. Не включай отраслевые нормы для товаров и сфер, которыми ESTRO не занимается, например товары для детей, алкоголь, табак или лекарства.",
-            "Для ежедневного блока налогов и кадров не повторяй нормы, которые вступили в силу более 45 дней назад, даже если поисковик снова показал старое разъяснение. Исключение: свежая официальная публикация должна содержать новое изменение, новый срок, новое разъяснение или новое обязательное действие для бизнеса.",
+            "Для ежедневного блока налогов и кадров не повторяй нормы, которые вступили в силу более 30 дней назад, даже если поисковик снова показал старое разъяснение. Если в одном источнике смешаны старые и новые нормы, включай только свежую часть. Исключение: свежая официальная публикация должна содержать новое изменение, новый срок, новое разъяснение или новое обязательное действие для бизнеса.",
             "Различай вступившие в силу нормы, подписанные решения, проекты и обсуждения. Не называй проект действующим законом.",
             "Для каждого непустого блока «Топливо», «Рынок стройматериалов и конкуренты», «Спрос: стройка, ипотека, ремонт», «Налоги, кадры и законодательство» и «Крупные государственные решения, влияющие на бизнес» обязательно укажи хотя бы один URL источника именно из переданного контекста. Для законов, налогов, государственных решений, официальной статистики и топливных ограничений используй только первоисточники. Если первоисточника нет, напиши, что подтверждённых свежих данных нет.",
             "Используй точные заголовки и именно в таком порядке: Погода и логистика; Топливо; Курсы; Рынок стройматериалов и конкуренты; Спрос: стройка, ипотека, ремонт; Налоги, кадры и законодательство; Крупные государственные решения, влияющие на бизнес; Что изменилось со вчера; Саня считает важным сегодня.",
