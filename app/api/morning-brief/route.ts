@@ -23,6 +23,17 @@ const ESTRO_COMPETITORS = [
   "Kerama Marazzi",
 ] as const;
 
+const ESTRO_OFFICIAL_SOURCE_HOSTS = [
+  "mela-rossa.ru",
+  "strukturasveta.ru",
+  "wowsvet.ru",
+  "afloor.pro",
+  "deartfloor.ru",
+  "mir-dekora.clients.site",
+  "elitkras.ru",
+  "kerama-marazzi.com",
+] as const;
+
 let redisClient: ReturnType<typeof createClient> | null = null;
 
 async function getRedis() {
@@ -477,6 +488,42 @@ function hasEstroCompetitorSignal(text: string) {
   );
 }
 
+function isOfficialEstroCompetitorUrl(url: string) {
+  try {
+    const parsed = new URL(url.replace(/[.,;]+$/, ""));
+    const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
+
+    if (
+      ESTRO_OFFICIAL_SOURCE_HOSTS.some(
+        (domain) => host === domain || host.endsWith(`.${domain}`)
+      )
+    ) {
+      return true;
+    }
+
+    if (
+      ["vk.com", "vk.ru", "m.vk.com", "m.vk.ru"].includes(host) &&
+      parsed.pathname.toLowerCase().startsWith("/melarossahome")
+    ) {
+      return true;
+    }
+
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function hasOfficialEstroCompetitorSource(text: string) {
+  return extractUrls(text).some(isOfficialEstroCompetitorUrl);
+}
+
+function hasStrongCompetitorEventSignal(text: string) {
+  return /(акци|скид|распрод|запуст|открыл|закрыл|новинк|нов(?:ая|ый|ое|ые)\s+(?:бренд|коллекц|шоурум|сервис|услуг)|измен(?:ил|ила|или|ение)|повыс|сниз|подорож|мероприят|презентац|встреча\s+для\s+дизайнер|поставк|переехал|переезд)/i.test(
+    text
+  );
+}
+
 function validateSearchSection(label: string, value: string) {
   const noVerified =
     "Подтверждённых свежих данных по этому блоку из подходящих источников не найдено.";
@@ -487,7 +534,11 @@ function validateSearchSection(label: string, value: string) {
 
   if (
     label === "СТРОЙМАТЕРИАЛЫ И КОНКУРЕНТЫ" &&
-    (!hasMarketEventSignal(value) || !hasEstroCompetitorSignal(value))
+    (
+      !hasMarketEventSignal(value) ||
+      !hasEstroCompetitorSignal(value) ||
+      !hasOfficialEstroCompetitorSource(value)
+    )
   ) {
     return noVerified;
   }
@@ -579,6 +630,50 @@ function getSectionBody(text: string, heading: string, nextHeading: string) {
   if (end < 0) return text.slice(bodyStart).trim();
 
   return text.slice(bodyStart, end).trim();
+}
+
+function sanitizeCompetitorSection(text: string) {
+  const heading = "Рынок стройматериалов и конкуренты";
+  const nextHeading = "Спрос: стройка, ипотека, ремонт";
+  const noData =
+    "По конкурентам ESTRO подтверждённых новых событий за последние 14 дней не найдено.";
+  const body = getSectionBody(text, heading, nextHeading);
+
+  if (!body) return text;
+
+  const urlMatches = Array.from(body.matchAll(/https?:\/\/[^\s)]+/g));
+  if (urlMatches.length === 0) {
+    return replaceSectionBody(text, heading, nextHeading, noData);
+  }
+
+  const kept: string[] = [];
+  let cursor = 0;
+
+  for (const match of urlMatches) {
+    const matchIndex = match.index ?? cursor;
+    const segmentEnd = matchIndex + match[0].length;
+    const segment = body
+      .slice(cursor, segmentEnd)
+      .replace(/^[\s.;,:-]+/, "")
+      .trim();
+    cursor = segmentEnd;
+
+    if (
+      segment &&
+      isOfficialEstroCompetitorUrl(match[0]) &&
+      hasEstroCompetitorSignal(segment) &&
+      hasStrongCompetitorEventSignal(segment)
+    ) {
+      kept.push(segment);
+    }
+  }
+
+  return replaceSectionBody(
+    text,
+    heading,
+    nextHeading,
+    kept.length > 0 ? kept.join("\n") : noData
+  );
 }
 
 function sectionHasVerifiedData(
@@ -709,27 +804,7 @@ function enforceFinalSourcePolicy(text: string) {
     }
   }
 
-  const marketBody = getSectionBody(
-    result,
-    "Рынок стройматериалов и конкуренты",
-    "Спрос: стройка, ипотека, ремонт"
-  );
-
-  if (
-    marketBody &&
-    (
-      extractUrls(marketBody).length === 0 ||
-      !hasMarketEventSignal(marketBody) ||
-      !hasEstroCompetitorSignal(marketBody)
-    )
-  ) {
-    result = replaceSectionBody(
-      result,
-      "Рынок стройматериалов и конкуренты",
-      "Спрос: стройка, ипотека, ремонт",
-      "Подтверждённых свежих событий по конкурентам ESTRO из заданного списка за выбранный период не найдено."
-    );
-  }
+  result = sanitizeCompetitorSection(result);
 
   return result;
 }
@@ -770,6 +845,7 @@ async function askYandexForBrief(context: string, previousBrief: string) {
             "Не заполняй отчёт шумом. Если по разделу существенных изменений нет, так и напиши. Не перечисляй просто существующие магазины или компании: для блока конкурентов нужны только новые действия или изменения. Старые топливные кризисы упоминай только если в свежих данных есть новое развитие.",
             "В блоке «Рынок стройматериалов и конкуренты» отслеживай как конкурентов только Mela Rossa, Структура Света, A-Floor, DeArt, Мир декора, ЭлитСтрой и Kerama Marazzi. Другие компании не называй конкурентами ESTRO и не включай их действия в этот блок. Массовые розничные сети, включая Лемана ПРО, не являются объектом конкурентного мониторинга.",
             "Для конкурентов считай значимыми только новые события: акции и изменение условий, цены, новые бренды и коллекции, изменения ассортимента, открытия или закрытия, новые шоурумы, мероприятия для дизайнеров, новые сервисы, поставки и заметные изменения позиционирования. Не повторяй событие из предыдущего брифа без нового развития.",
+            "Для блока конкурентов используй только официальные источники: mela-rossa.ru, strukturasveta.ru, wowsvet.ru, afloor.pro, deartfloor.ru, mir-dekora.clients.site, elitkras.ru, kerama-marazzi.com и прямой официальный профиль Mela Rossa vk.com/melarossahome. Не используй Zoon, 2ГИС, каталоги, агрегаторы, чужие соцсети и VK-ссылки, по которым нельзя подтвердить принадлежность официальному аккаунту. Обычное описание деятельности, ассортимента или факт работы с дизайнерами не считай свежим событием.",
             "Различай вступившие в силу нормы, подписанные решения, проекты и обсуждения. Не называй проект действующим законом.",
             "Для каждого непустого блока «Топливо», «Рынок стройматериалов и конкуренты», «Спрос: стройка, ипотека, ремонт», «Налоги, кадры и законодательство» и «Крупные государственные решения, влияющие на бизнес» обязательно укажи хотя бы один URL источника именно из переданного контекста. Для законов, налогов, государственных решений, официальной статистики и топливных ограничений используй только первоисточники. Если первоисточника нет, напиши, что подтверждённых свежих данных нет.",
             "Используй точные заголовки и именно в таком порядке: Погода и логистика; Топливо; Курсы; Рынок стройматериалов и конкуренты; Спрос: стройка, ипотека, ремонт; Налоги, кадры и законодательство; Крупные государственные решения, влияющие на бизнес; Что изменилось со вчера; Саня считает важным сегодня.",
@@ -834,8 +910,8 @@ async function buildMorningBrief() {
     ]),
 
     searchMany([
-      "Красноярск, последние 14 дней: \"Mela Rossa\" OR \"Структура Света\" OR \"A-Floor\" OR \"DeArt\". Найди только новые события этих компаний: акции, цены и условия, новые бренды или коллекции, изменения ассортимента, открытия или закрытия, шоурумы, мероприятия для дизайнеров, новые услуги, поставки, заметные изменения позиционирования. Не добавляй другие компании.",
-      "Красноярск, последние 14 дней: \"Мир декора\" OR \"ЭлитСтрой\" OR \"Kerama Marazzi\". Найди только новые события этих компаний: акции, цены и условия, новые бренды или коллекции, изменения ассортимента, открытия или закрытия, шоурумы, мероприятия для дизайнеров, новые услуги, поставки, заметные изменения позиционирования. Не добавляй другие компании.",
+      "Красноярск последние 14 дней (site:mela-rossa.ru OR site:vk.com/melarossahome OR site:krsk.strukturasveta.ru OR site:wowsvet.ru OR site:afloor.pro OR site:krasnoyarsk.deartfloor.ru) \"Mela Rossa\" OR \"Структура Света\" OR \"A-Floor\" OR \"DeArt\" акция скидка новинка коллекция открытие закрытие шоурум мероприятие дизайнеры новый сервис поставка изменение условий. Только официальные источники и только новое событие.",
+      "Красноярск последние 14 дней (site:mir-dekora.clients.site OR site:elitkras.ru OR site:krsk.kerama-marazzi.com OR site:kerama-marazzi.com) \"Мир декора\" OR \"ЭлитСтрой\" OR \"Kerama Marazzi\" акция скидка новинка коллекция открытие закрытие шоурум мероприятие дизайнеры новый сервис поставка изменение условий. Только официальные источники и только новое событие.",
     ]),
 
     searchMany([
