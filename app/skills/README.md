@@ -21,6 +21,10 @@ A skill can become `native` only after:
 4. preview deployment succeeds;
 5. production behavior is checked after merge.
 
+## Current native skill
+
+`research` is the first native skill. It has its own trigger matching, mode selection, web search, source verification and synthesis.
+
 ## Next migration
 
-The next new native skill is planned to be `research`.
+After Research is stable in production, migrate existing capabilities one by one instead of rewriting the Telegram route wholesale.

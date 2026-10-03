@@ -19,10 +19,16 @@ export type SkillCostProfile =
   | "existing-yandex-services"
   | "external-integration";
 
+export type SkillMessage = {
+  role: "user" | "assistant";
+  content: string;
+};
+
 export type SkillContext = {
   chatId: number;
   text: string;
   replyText?: string;
+  history?: readonly SkillMessage[];
 };
 
 export type SkillMatch = {

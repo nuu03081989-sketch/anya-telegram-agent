@@ -9,6 +9,7 @@ import {
   buildWardrobeMoodboardSearch,
   WARDROBE_MOODBOARD_SYSTEM_RULE,
 } from "@/app/lib/wardrobe-image-rules";
+import { researchModeLabel, researchSkill } from "@/app/skills/research";
 
 export const runtime = "nodejs";
 
@@ -2656,6 +2657,30 @@ export async function POST(request: Request) {
       return Response.json({ ok: true });
     }
 
+    const researchContext = {
+      chatId,
+      text,
+      replyText: repliedText,
+      history,
+    };
+    const researchMatch = await researchSkill.handler?.match(researchContext);
+
+    if (researchMatch?.matched && researchSkill.handler) {
+      await sendTelegramMessage(
+        chatId,
+        `Собираю исследование. Режим: ${researchModeLabel(text)}...`
+      );
+
+      const researchResult = await researchSkill.handler.run(researchContext);
+      const researchAnswer =
+        researchResult.text ||
+        "Аня, исследование завершилось без текста результата. Попробуй сформулировать тему чуть конкретнее.";
+
+      await sendTelegramMessage(chatId, researchAnswer);
+      await saveExchange(chatId, text, researchAnswer);
+      return Response.json({ ok: true, skill: "research" });
+    }
+
     await sendTelegramMessage(chatId, "Принял. Обрабатываю запрос...");
 
     if (isNavigationQuery(text)) {
@@ -2726,7 +2751,10 @@ export async function POST(request: Request) {
 
     if (
       message.includes("WEB_SEARCH_TIMEOUT") ||
-      message.includes("MODEL_TIMEOUT")
+      message.includes("MODEL_TIMEOUT") ||
+      message.includes("RESEARCH_SEARCH_TIMEOUT") ||
+      message.includes("RESEARCH_PLAN_TIMEOUT") ||
+      message.includes("RESEARCH_MODEL_TIMEOUT")
     ) {
       await sendTelegramMessage(
         chatId,

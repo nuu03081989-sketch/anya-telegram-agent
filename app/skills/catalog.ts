@@ -1,3 +1,4 @@
+import { researchSkill } from "./research";
 import { defineSkill } from "./types";
 
 export const SKILLS = [
@@ -11,16 +12,7 @@ export const SKILLS = [
     triggerHints: ["образ", "лук", "гардероб", "что надеть", "референсы"],
     dependencies: ["Yandex Search", "Telegram reply context"],
   }),
-  defineSkill({
-    id: "research",
-    title: "Research",
-    description:
-      "Исследование темы с поиском, проверкой источников, сравнением и управленческой выжимкой.",
-    status: "planned",
-    costProfile: "existing-yandex-services",
-    triggerHints: ["исследуй", "сравни", "найди информацию", "проверь рынок"],
-    dependencies: ["Yandex Search", "YandexGPT"],
-  }),
+  researchSkill,
   defineSkill({
     id: "document-analysis",
     title: "Анализ документов",
