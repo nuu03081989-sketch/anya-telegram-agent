@@ -4,19 +4,11 @@ import { navigationSkill } from "./navigation";
 import { morningBriefSkill } from "./morning-brief";
 import { productFromPhotoSkill } from "./product-from-photo";
 import { researchSkill } from "./research";
+import { wardrobeSkill } from "./wardrobe";
 import { defineSkill } from "./types";
 
 export const SKILLS = [
-  defineSkill({
-    id: "wardrobe",
-    title: "Гардероб и визуальный подбор",
-    description:
-      "Подбор образов, визуальных референсов и работа с контекстом списка одежды.",
-    status: "legacy",
-    costProfile: "existing-yandex-services",
-    triggerHints: ["образ", "лук", "гардероб", "что надеть", "референсы"],
-    dependencies: ["Yandex Search", "Telegram reply context"],
-  }),
+  wardrobeSkill,
   researchSkill,
   productFromPhotoSkill,
   documentAnalysisSkill,

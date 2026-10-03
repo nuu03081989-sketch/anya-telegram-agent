@@ -50,6 +50,11 @@ export type SkillResult = {
   buttonUrl?: string;
   buttonText?: string;
   historyText?: string;
+  imageQueries?: readonly {
+    label: string;
+    query: string;
+    fallbackQuery: string;
+  }[];
 };
 
 export type SkillHandler = {
