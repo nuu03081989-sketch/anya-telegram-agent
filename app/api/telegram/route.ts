@@ -11,6 +11,10 @@ import {
 } from "@/app/skills/document-analysis";
 import { expenseControlSkill } from "@/app/skills/expense-control";
 import { navigationSkill } from "@/app/skills/navigation";
+import {
+  morningBriefAction,
+  morningBriefSkill,
+} from "@/app/skills/morning-brief";
 
 export const runtime = "nodejs";
 
@@ -22,7 +26,6 @@ const YANDEX_IMAGE_BY_IMAGE_API = "https://searchapi.api.cloud.yandex.net/v2/ima
 const YANDEX_VISION_MODEL = "qwen3.6-35b-a3b";
 const YANDEX_SPEECHKIT_STT_API = "https://stt.api.cloud.yandex.net";
 const WEBHOOK_URL = "https://anya-telegram-agent.vercel.app/api/telegram";
-const PUBLIC_APP_URL = "https://anya-telegram-agent.vercel.app";
 const HISTORY_STORE_LIMIT = 30;
 const HISTORY_CONTEXT_LIMIT = 16;
 const HISTORY_TTL_SECONDS = 60 * 60 * 24 * 14;
@@ -286,37 +289,6 @@ async function saveExchange(
       .exec();
   } catch (error) {
     console.error("Could not save Redis history", error);
-  }
-}
-
-const MORNING_BRIEF_CHAT_KEY = "telegram:morning-brief:chat-id";
-
-async function enableMorningBrief(chatId: number) {
-  const redis = await getRedis();
-  await redis.set(MORNING_BRIEF_CHAT_KEY, String(chatId));
-}
-
-async function disableMorningBrief() {
-  const redis = await getRedis();
-  await redis.del(MORNING_BRIEF_CHAT_KEY);
-}
-
-async function triggerMorningBriefNow() {
-  const secret = process.env.MORNING_BRIEF_SECRET;
-  if (!secret) throw new Error("MORNING_BRIEF_SECRET is missing");
-
-  const response = await fetch(`${PUBLIC_APP_URL}/api/morning-brief`, {
-    method: "POST",
-    headers: {
-      "x-brief-secret": secret,
-    },
-  });
-
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(
-      `Morning brief trigger failed: ${response.status} ${body.slice(0, 500)}`
-    );
   }
 }
 
@@ -1731,49 +1703,47 @@ export async function POST(request: Request) {
     return Response.json({ ok: true });
   }
 
-  if (text === "/brief-on") {
-    try {
-      await enableMorningBrief(chatId);
-      await sendTelegramMessage(
-        chatId,
-        "Аня, этот чат назначил для утреннего брифа. Следующий шаг - подключить расписание на 10:00 по Красноярску."
-      );
-    } catch (error) {
-      console.error("Could not enable morning brief", error);
-      await sendTelegramMessage(
-        chatId,
-        "Аня, не смог включить утренний бриф. Попробуй ещё раз чуть позже."
-      );
-    }
-    return Response.json({ ok: true });
-  }
+  const briefAction = morningBriefAction(text);
 
-  if (text === "/brief-off") {
-    try {
-      await disableMorningBrief();
-      await sendTelegramMessage(chatId, "Аня, ежедневный утренний бриф отключил.");
-    } catch (error) {
-      console.error("Could not disable morning brief", error);
-      await sendTelegramMessage(
-        chatId,
-        "Аня, не смог отключить утренний бриф. Попробуй ещё раз чуть позже."
-      );
-    }
-    return Response.json({ ok: true });
-  }
+  if (briefAction) {
+    const briefContext = {
+      chatId,
+      text,
+      replyText: repliedText,
+    };
 
-  if (text === "/brief-now") {
     try {
-      await sendTelegramMessage(chatId, "Принял. Собираю утренний бриф...");
-      await triggerMorningBriefNow();
+      if (briefAction === "now") {
+        await sendTelegramMessage(chatId, "Принял. Собираю утренний бриф...");
+      }
+
+      const match =
+        await morningBriefSkill.handler?.match(briefContext);
+
+      if (!match?.matched || !morningBriefSkill.handler) {
+        throw new Error("MORNING_BRIEF_SKILL_NOT_MATCHED");
+      }
+
+      const result =
+        await morningBriefSkill.handler.run(briefContext);
+
+      if (result.text) {
+        await sendTelegramMessage(chatId, result.text);
+      }
     } catch (error) {
-      console.error("Could not trigger morning brief", error);
-      await sendTelegramMessage(
-        chatId,
-        "Аня, тестовый бриф пока не запустился. Проверь настройку MORNING_BRIEF_SECRET."
-      );
+      console.error("Morning brief skill failed", error);
+
+      const fallback =
+        briefAction === "on"
+          ? "Аня, не смог включить утренний бриф. Попробуй ещё раз чуть позже."
+          : briefAction === "off"
+            ? "Аня, не смог отключить утренний бриф. Попробуй ещё раз чуть позже."
+            : "Аня, тестовый бриф пока не запустился. Проверь настройку MORNING_BRIEF_SECRET.";
+
+      await sendTelegramMessage(chatId, fallback);
     }
-    return Response.json({ ok: true });
+
+    return Response.json({ ok: true, skill: "morning-brief" });
   }
 
   if (text === "/expenses") {

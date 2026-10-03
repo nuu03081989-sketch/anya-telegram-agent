@@ -1,6 +1,7 @@
 import { documentAnalysisSkill } from "./document-analysis";
 import { expenseControlSkill } from "./expense-control";
 import { navigationSkill } from "./navigation";
+import { morningBriefSkill } from "./morning-brief";
 import { productFromPhotoSkill } from "./product-from-photo";
 import { researchSkill } from "./research";
 import { defineSkill } from "./types";
@@ -21,16 +22,7 @@ export const SKILLS = [
   documentAnalysisSkill,
   expenseControlSkill,
   navigationSkill,
-  defineSkill({
-    id: "morning-brief",
-    title: "Утренний бриф",
-    description:
-      "Ежедневная бизнес-сводка по погоде, рынку, конкурентам, спросу, законам и расходам.",
-    status: "legacy",
-    costProfile: "existing-yandex-services",
-    triggerHints: ["утренний бриф", "/brief-now"],
-    dependencies: ["Yandex Search", "YandexGPT", "Redis", "Yandex Cloud trigger"],
-  }),
+  morningBriefSkill,
   defineSkill({
     id: "gmail",
     title: "Gmail",
