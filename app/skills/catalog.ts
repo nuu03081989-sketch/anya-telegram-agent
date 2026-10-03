@@ -1,5 +1,6 @@
 import { documentAnalysisSkill } from "./document-analysis";
 import { expenseControlSkill } from "./expense-control";
+import { navigationSkill } from "./navigation";
 import { productFromPhotoSkill } from "./product-from-photo";
 import { researchSkill } from "./research";
 import { defineSkill } from "./types";
@@ -19,16 +20,7 @@ export const SKILLS = [
   productFromPhotoSkill,
   documentAnalysisSkill,
   expenseControlSkill,
-  defineSkill({
-    id: "navigation",
-    title: "Навигация",
-    description:
-      "Маршруты, дорожная ситуация и оценка времени в пути.",
-    status: "legacy",
-    costProfile: "no-new-cost",
-    triggerHints: ["маршрут", "пробки", "как доехать", "сколько ехать"],
-    dependencies: ["Yandex Navigator", "Mapbox traffic"],
-  }),
+  navigationSkill,
   defineSkill({
     id: "morning-brief",
     title: "Утренний бриф",

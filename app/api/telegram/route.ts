@@ -1,9 +1,5 @@
 import { createClient } from "redis";
 import {
-  formatKrasnoyarskTraffic,
-  getKrasnoyarskTraffic,
-} from "@/app/lib/krasnoyarsk-traffic";
-import {
   buildWardrobeMoodboardSearch,
   WARDROBE_MOODBOARD_SYSTEM_RULE,
 } from "@/app/lib/wardrobe-image-rules";
@@ -14,6 +10,7 @@ import {
   sanitizeDocumentMemory,
 } from "@/app/skills/document-analysis";
 import { expenseControlSkill } from "@/app/skills/expense-control";
+import { navigationSkill } from "@/app/skills/navigation";
 
 export const runtime = "nodejs";
 
@@ -334,185 +331,6 @@ async function clearHistory(chatId: number) {
   }
 }
 
-function isNavigationQuery(text: string) {
-  return /(пролож(?:и|ить)|маршрут|навигатор|как доехать|как добраться|поехали|ехать до|доехать до)/i.test(
-    text
-  );
-}
-
-async function extractNavigationDestination(userText: string) {
-  const apiKey = process.env.YANDEX_API_KEY;
-  const folderId = process.env.YANDEX_FOLDER_ID;
-
-  if (!apiKey || !folderId) {
-    throw new Error("Yandex credentials are missing for navigation");
-  }
-
-  const response = await fetchWithTimeout(
-    YANDEX_API,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Api-Key ${apiKey}`,
-        "x-folder-id": folderId,
-      },
-      body: JSON.stringify({
-      model: `gpt://${folderId}/yandexgpt-5-lite`,
-      temperature: 0,
-      max_tokens: 120,
-      messages: [
-        {
-          role: "system",
-          content:
-            "Извлеки из запроса только точку назначения для автомобильного маршрута. Верни короткую поисковую фразу без пояснений. Если город не указан и это локальное место, организация, улица или адрес, добавь «Красноярск». Не добавляй Красноярск, если в запросе явно указан другой город или регион.",
-        },
-        {
-          role: "user",
-          content: userText,
-        },
-      ],
-      }),
-    },
-    MODEL_REQUEST_TIMEOUT_MS,
-    "MODEL_TIMEOUT"
-  );
-
-  const data = await response.json();
-
-  if (!response.ok) {
-    throw new Error(
-      `Navigation destination extraction failed: ${response.status} ${JSON.stringify(data)}`
-    );
-  }
-
-  const destination =
-    data?.choices?.[0]?.message?.content ??
-    data?.result?.alternatives?.[0]?.message?.text;
-
-  if (!destination) {
-    throw new Error("Navigation destination is empty");
-  }
-
-  return String(destination).trim().replace(/^["'«]|["'»]$/g, "");
-}
-
-async function extractCoordinatesFromSearch(
-  destination: string,
-  searchContext: string
-) {
-  const apiKey = process.env.YANDEX_API_KEY;
-  const folderId = process.env.YANDEX_FOLDER_ID;
-
-  if (!apiKey || !folderId) {
-    throw new Error("Yandex credentials are missing for coordinate extraction");
-  }
-
-  const response = await fetch(YANDEX_API, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Api-Key ${apiKey}`,
-      "x-folder-id": folderId,
-    },
-    body: JSON.stringify({
-      model: `gpt://${folderId}/yandexgpt-5-lite`,
-      temperature: 0,
-      max_tokens: 120,
-      messages: [
-        {
-          role: "system",
-          content:
-            "По переданным результатам поиска найди координаты именно указанного места. Верни строго одну строку в формате LAT|LON|NAME, где LAT и LON только десятичные числа. Если надёжных координат нет, верни NOT_FOUND. Не придумывай координаты.",
-        },
-        {
-          role: "user",
-          content:
-            `Место: ${destination}\n\nРезультаты поиска:\n${searchContext}`,
-        },
-      ],
-    }),
-  });
-
-  const data = await response.json();
-
-  if (!response.ok) {
-    throw new Error(
-      `Coordinate extraction failed: ${response.status} ${JSON.stringify(data)}`
-    );
-  }
-
-  const raw =
-    data?.choices?.[0]?.message?.content ??
-    data?.result?.alternatives?.[0]?.message?.text ??
-    "NOT_FOUND";
-
-  const line = String(raw).trim();
-  if (line === "NOT_FOUND") return null;
-
-  const match = line.match(
-    /^(-?\d{1,2}(?:\.\d+)?)\|(-?\d{1,3}(?:\.\d+)?)\|(.+)$/
-  );
-
-  if (!match) return null;
-
-  const lat = Number(match[1]);
-  const lon = Number(match[2]);
-  const name = match[3].trim();
-
-  if (
-    !Number.isFinite(lat) ||
-    !Number.isFinite(lon) ||
-    lat < -90 ||
-    lat > 90 ||
-    lon < -180 ||
-    lon > 180
-  ) {
-    return null;
-  }
-
-  return { lat, lon, name };
-}
-
-async function buildNavigatorRoute(userText: string) {
-  const destination = await extractNavigationDestination(userText);
-  const searchContext = await searchWeb(
-    `Найди точные координаты места: ${destination}. Нужны широта и долгота, проверь что место соответствует запросу.`
-  );
-  const coordinates = await extractCoordinatesFromSearch(
-    destination,
-    searchContext
-  );
-
-  if (!coordinates) {
-    const fallbackUrl =
-      `${PUBLIC_APP_URL}/api/navigate?q=${encodeURIComponent(destination)}`;
-
-    return {
-      text:
-        `Аня, точные координаты «${destination}» надёжно определить не получилось. Открою поиск этого места в Яндекс Навигаторе.`,
-      buttonUrl: fallbackUrl,
-      buttonText: "Открыть в Яндекс Навигаторе",
-      historyText: `Предложил поиск в Яндекс Навигаторе для «${destination}».`,
-    };
-  }
-
-  const routeUrl =
-    `${PUBLIC_APP_URL}/api/navigate?lat=${encodeURIComponent(
-      coordinates.lat
-    )}&lon=${encodeURIComponent(coordinates.lon)}&name=${encodeURIComponent(
-      coordinates.name || destination
-    )}`;
-
-  return {
-    text:
-      `Аня, нашёл: ${coordinates.name || destination}.\nСтартовая точка будет взята из текущего местоположения телефона.`,
-    buttonUrl: routeUrl,
-    buttonText: "Открыть в Яндекс Навигаторе",
-    historyText: `Построил ссылку Яндекс Навигатора до «${coordinates.name || destination}».`,
-  };
-}
-
 function normalizeWebQuery(text: string) {
   return text.replace(/^\/web\s*/i, "").trim();
 }
@@ -560,12 +378,6 @@ const OPEN_METEO_FORECAST = "https://api.open-meteo.com/v1/forecast";
 
 function isWeatherQuery(text: string) {
   return /(погод|температур|прогноз|дожд|снег|ветер|осадк|давлен|влажност)/i.test(
-    text
-  );
-}
-
-function isTrafficQuery(text: string) {
-  return /(пробк|затор|загруженност.{0,12}дорог|дорожн.{0,12}(?:обстанов|ситуац)|трафик.{0,12}(?:дорог|город)|как.{0,12}дорог|дорог.{0,12}загруж)/i.test(
     text
   );
 }
@@ -2405,43 +2217,40 @@ export async function POST(request: Request) {
       return Response.json({ ok: true });
     }
 
-    if (isTrafficQuery(text)) {
-      await sendTelegramMessage(chatId, "Проверяю дорожную обстановку...");
+    const navigationContext = {
+      chatId,
+      text,
+      replyText: repliedText,
+      history,
+    };
+    const navigationMatch =
+      await navigationSkill.handler?.match(navigationContext);
 
-      try {
-        const traffic = await getKrasnoyarskTraffic();
-        const answer = formatKrasnoyarskTraffic(traffic);
-        await sendTelegramMessage(chatId, answer);
-        await saveExchange(chatId, text, answer);
-      } catch (error) {
-        console.error(
-          "Krasnoyarsk traffic failed",
-          error instanceof Error ? error.message : "unknown error"
-        );
+    if (navigationMatch?.matched && navigationSkill.handler) {
+      await sendTelegramMessage(
+        chatId,
+        navigationMatch.reason === "traffic intent"
+          ? "Проверяю дорожную обстановку..."
+          : "Строю маршрут..."
+      );
 
-        const message = String(error);
-        let answer =
-          "Аня, сейчас не смог получить live-данные по дорогам Красноярска. Обычными ссылками вместо ответа отделываться не буду.";
+      const result =
+        await navigationSkill.handler.run(navigationContext);
+      const answer =
+        result.text ||
+        "Аня, навигационный запрос обработался без текста результата.";
 
-        if (message.includes("MAPBOX_ACCESS_TOKEN_MISSING")) {
-          answer += " В production не виден MAPBOX_ACCESS_TOKEN.";
-        } else if (
-          message.includes("MAPBOX_TRAFFIC_UNAUTHORIZED") ||
-          message.includes("MAPBOX_TRAFFIC_FORBIDDEN")
-        ) {
-          answer += " Mapbox не дал доступ к driving-traffic по текущему токену.";
-        } else if (message.includes("MAPBOX_TRAFFIC_RATE_LIMIT")) {
-          answer += " Mapbox временно ограничил число запросов.";
-        } else if (message.includes("MAPBOX_TRAFFIC_TIMEOUT")) {
-          answer += " Mapbox не успел ответить вовремя.";
-        } else {
-          answer += " Источник временно не ответил корректно.";
-        }
+      await sendTelegramMessage(chatId, answer, {
+        buttonUrl: result.buttonUrl,
+        buttonText: result.buttonText,
+      });
+      await saveExchange(
+        chatId,
+        text,
+        result.historyText || answer
+      );
 
-        await sendTelegramMessage(chatId, answer);
-      }
-
-      return Response.json({ ok: true });
+      return Response.json({ ok: true, skill: "navigation" });
     }
 
     const researchContext = {
@@ -2469,16 +2278,6 @@ export async function POST(request: Request) {
     }
 
     await sendTelegramMessage(chatId, "Принял. Обрабатываю запрос...");
-
-    if (isNavigationQuery(text)) {
-      const navigation = await buildNavigatorRoute(text);
-      await sendTelegramMessage(chatId, navigation.text, {
-        buttonUrl: navigation.buttonUrl,
-        buttonText: navigation.buttonText,
-      });
-      await saveExchange(chatId, text, navigation.historyText);
-      return Response.json({ ok: true });
-    }
 
     const webNeeded = shouldUseWebSearch(text);
     const queryText = normalizeWebQuery(text);
