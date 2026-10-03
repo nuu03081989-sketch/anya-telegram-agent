@@ -20,6 +20,7 @@ type EvidenceProfile = {
   localIntent: boolean;
   freshCount: number;
   localCount: number;
+  freshLocalCount: number;
   officialCount: number;
   strongCount: number;
 };
@@ -118,8 +119,30 @@ function isClearlyStale(hit: SearchHit, currentYear: number) {
 }
 
 function looksLocal(hit: SearchHit) {
-  const text = `${hit.title} ${hit.snippet} ${hit.url} ${hit.query}`;
+  const text = `${hit.title} ${hit.snippet} ${hit.url}`;
   return /(?:красноярск|krasnoyarsk|24\.rosstat)/i.test(text);
+}
+
+function sanitizeSnippetForCurrentResearch(
+  snippet: string,
+  currentYear: number
+) {
+  const sentences = snippet
+    .split(/(?<=[.!?])\s+/)
+    .map((sentence) => sentence.trim())
+    .filter(Boolean);
+
+  const freshSentences = sentences.filter((sentence) => {
+    const years = Array.from(sentence.matchAll(/\b(20\d{2})\b/g)).map(
+      (match) => Number(match[1])
+    );
+
+    if (years.length === 0) return true;
+
+    return Math.max(...years) >= currentYear - 1;
+  });
+
+  return freshSentences.join(" ").trim();
 }
 
 function looksFresh(hit: SearchHit, currentYear: number) {
@@ -455,6 +478,9 @@ function evidenceProfile(subject: string, hits: SearchHit[]): EvidenceProfile {
   const localIntent = isLocalResearch(subject);
   const freshCount = hits.filter((hit) => looksFresh(hit, currentYear)).length;
   const localCount = hits.filter(looksLocal).length;
+  const freshLocalCount = hits.filter(
+    (hit) => looksLocal(hit) && looksFresh(hit, currentYear)
+  ).length;
   const officialCount = hits.filter((hit) => isOfficialSource(hit.url)).length;
   const strongCount = hits.filter(
     (hit) =>
@@ -467,6 +493,7 @@ function evidenceProfile(subject: string, hits: SearchHit[]): EvidenceProfile {
     localIntent,
     freshCount,
     localCount,
+    freshLocalCount,
     officialCount,
     strongCount,
   };
@@ -494,12 +521,33 @@ async function collectSources(
   return selectSources(allHits, mode, subject);
 }
 
-function sourcePack(hits: SearchHit[]) {
+function sourcePack(subject: string, hits: SearchHit[]) {
+  const currentYear = krasnoyarskYear();
+  const currentIntent = isCurrentResearch(subject);
+
   return hits
-    .map(
-      (hit, index) =>
-        `[${index + 1}] ${hit.title}\nURL: ${hit.url}\nФрагмент: ${hit.snippet || "нет фрагмента"}`
-    )
+    .map((hit, index) => {
+      const snippet = currentIntent
+        ? sanitizeSnippetForCurrentResearch(hit.snippet, currentYear)
+        : hit.snippet;
+
+      const flags = [
+        isOfficialSource(hit.url) ? "официальный" : "",
+        looksLocal(hit) ? "локальный" : "",
+        looksFresh(hit, currentYear) ? "свежий" : "",
+      ]
+        .filter(Boolean)
+        .join(", ");
+
+      return [
+        `[${index + 1}] ${hit.title}`,
+        `URL: ${hit.url}`,
+        flags ? `Признаки: ${flags}` : "",
+        `Фрагмент: ${snippet || "нет свежего пригодного фрагмента"}`,
+      ]
+        .filter(Boolean)
+        .join("\n");
+    })
     .join("\n\n")
     .slice(0, 20_000);
 }
@@ -541,12 +589,13 @@ async function synthesizeResearch(
               "Первоисточники и официальные публикации важнее пересказов и агрегаторов, но независимые источники используй для проверки и альтернативной точки зрения.",
               "Не делай вывод «спрос растёт», «рынок стабилен», «рынок падает» или иной направленный рыночный вывод, если в источниках нет свежих данных, которые прямо показывают такую динамику.",
               "Не переносись от данных по России или миру к Красноярску как будто это одно и то же. Если локальных данных нет, прямо напиши, что локальный тренд не подтверждён.",
+              "Для запроса про текущую ситуацию не используй как доказательство текущего тренда отдельные цифры 2023 года и более ранние данные, даже если они находятся на странице 2025-2026 года.",
               "Если свежих сильных источников недостаточно, ответ должен начинаться с ограничения данных, а не с уверенного вывода.",
               "Если запрос касается ESTRO, учитывай: Красноярск, средний/средний+ сегмент, средний заказ от 500 000 рублей; категории - сантехника, отопление, отделочные материалы, напольные покрытия, плитка, керамогранит, освещение.",
               "Не относись к массовым строительным гипермаркетам как к прямым конкурентам ESTRO без явного основания.",
               "Ответ по-русски, без эмодзи и длинного тире. Не используй выдуманные цитаты.",
               "Структура: Короткий вывод; Ключевые факты; Что это значит; Риски и неопределённость.",
-              "Каждый важный факт помечай ссылкой на номер источника в квадратных скобках, например [1].",
+              "Не ставь номера источников [1], [2] и т.п. внутрь текста: соответствие факта конкретному источнику пока не проверяется программно. Список источников будет добавлен отдельно.",
               "Не добавляй список URL в конце, он будет добавлен программно.",
               mode === "quick"
                 ? "Будь очень кратким: до 1400 знаков."
@@ -560,7 +609,7 @@ async function synthesizeResearch(
             content: [
               `Тема исследования: ${subject}`,
               `Режим: ${MODE_LABEL[mode]}`,
-              `Профиль доказательств: свежих источников с явным годом ${evidence.freshCount}; локальных ${evidence.localCount}; официальных ${evidence.officialCount}; сильных ${evidence.strongCount}.`,
+              `Профиль доказательств: свежих источников с явным годом ${evidence.freshCount}; локальных ${evidence.localCount}; свежих локальных ${evidence.freshLocalCount}; официальных ${evidence.officialCount}; сильных ${evidence.strongCount}.`,
               evidence.currentIntent && evidence.freshCount === 0
                 ? "ОГРАНИЧЕНИЕ: запрос про текущую ситуацию, но в отобранных источниках нет явно свежих данных. Нельзя делать уверенный текущий вывод."
                 : "",
@@ -570,7 +619,7 @@ async function synthesizeResearch(
               contextText ? `Контекст диалога: ${contextText}` : "",
               "",
               "ИСТОЧНИКИ:",
-              sourcePack(hits),
+              sourcePack(subject, hits),
             ]
               .filter(Boolean)
               .join("\n"),
@@ -633,15 +682,23 @@ async function runResearch(context: SkillContext): Promise<SkillResult> {
   }
 
   const evidence = evidenceProfile(subject, hits);
+  const insufficientCurrentLocalEvidence =
+    evidence.currentIntent &&
+    evidence.localIntent &&
+    (evidence.freshLocalCount === 0 ||
+      evidence.freshCount < 2 ||
+      evidence.strongCount < 2);
+
   if (
     mode !== "deep" &&
-    ((evidence.currentIntent && evidence.freshCount === 0) ||
+    (insufficientCurrentLocalEvidence ||
+      (evidence.currentIntent && evidence.freshCount === 0) ||
       (evidence.localIntent && evidence.localCount === 0))
   ) {
     return {
       handled: true,
       text:
-        "Аня, по этой формулировке я не нашёл достаточно свежих локальных данных для уверенного вывода. Общероссийские и старые материалы за Красноярск выдавать не буду. Для следующей попытки лучше запустить /research deep по той же теме.",
+        "Аня, по этой формулировке я не нашёл достаточно свежих локальных данных для уверенного вывода. Общероссийские материалы и старые цифры за Красноярск выдавать не буду. Для следующей попытки лучше запустить /research deep по той же теме.",
     };
   }
 
