@@ -127,6 +127,97 @@ export function isProductShoppingPhotoRequest(text: string) {
   );
 }
 
+function extractModelText(data: any) {
+  const content = data?.choices?.[0]?.message?.content;
+
+  if (typeof content === "string") {
+    return content.trim();
+  }
+
+  if (Array.isArray(content)) {
+    const joined = content
+      .map((item: any) =>
+        typeof item === "string"
+          ? item
+          : String(item?.text ?? item?.content ?? "")
+      )
+      .filter(Boolean)
+      .join(" ")
+      .trim();
+
+    if (joined) return joined;
+  }
+
+  return String(
+    data?.result?.alternatives?.[0]?.message?.text ?? ""
+  ).trim();
+}
+
+async function identifyProductPlain(
+  imageBase64: string,
+  userText: string
+): Promise<ProductIdentity> {
+  const apiKey = process.env.YANDEX_API_KEY;
+  const folderId = process.env.YANDEX_FOLDER_ID;
+
+  if (!apiKey) throw new Error("YANDEX_API_KEY is missing");
+  if (!folderId) throw new Error("YANDEX_FOLDER_ID is missing");
+
+  const response = await fetchWithTimeout(
+    YANDEX_API,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Api-Key ${apiKey}`,
+        "x-folder-id": folderId,
+      },
+      body: JSON.stringify({
+        model: `gpt://${folderId}/${YANDEX_VISION_MODEL}`,
+        temperature: 0.2,
+        max_tokens: 1000,
+        messages: [
+          {
+            role: "system",
+            content:
+              "Ты Саня. Определи товар на фотографии максимально конкретно. Назови сам предмет, бренд или лицензию только если они видны, перепиши заметные надписи и укажи цвет/форму. Не выдумывай модель или артикул. Ответь одной короткой фразой без JSON.",
+          },
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text:
+                  userText ||
+                  "Что это за товар? Опиши его так, чтобы затем можно было найти в продаже.",
+              },
+              {
+                type: "image_url",
+                image_url: {
+                  url: `data:image/jpeg;base64,${imageBase64}`,
+                },
+              },
+            ],
+          },
+        ],
+      }),
+    },
+    MODEL_TIMEOUT_MS,
+    "PRODUCT_PHOTO_IDENTIFY_RETRY_TIMEOUT"
+  );
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(
+      `PRODUCT_PHOTO_IDENTIFY_RETRY_FAILED: ${response.status} ${JSON.stringify(data).slice(0, 700)}`
+    );
+  }
+
+  const raw = extractModelText(data);
+  return looseIdentityFromText(raw, userText);
+}
+
 async function identifyProduct(
   imageBase64: string,
   userText: string
@@ -193,11 +284,7 @@ async function identifyProduct(
     );
   }
 
-  const raw = String(
-    data?.choices?.[0]?.message?.content ??
-      data?.result?.alternatives?.[0]?.message?.text ??
-      ""
-  );
+  const raw = extractModelText(data);
 
   const parsed = extractJsonObject(raw);
 
@@ -501,7 +588,32 @@ async function runProductFromPhoto(
     };
   }
 
-  const identity = await identifyProduct(context.imageBase64, context.text);
+  let identity: ProductIdentity;
+
+  try {
+    identity = await identifyProduct(context.imageBase64, context.text);
+  } catch (error) {
+    console.error(
+      "Structured product identification failed, retrying plain photo analysis",
+      error
+    );
+
+    try {
+      identity = await identifyProductPlain(
+        context.imageBase64,
+        context.text
+      );
+    } catch (retryError) {
+      console.error("Plain product identification failed", retryError);
+
+      return {
+        handled: true,
+        text:
+          "Аня, фото получил и понял, что нужно найти товар в продаже, но распознавание самого предмета сейчас не ответило даже со второй попытки. Поиск вслепую запускать не буду. Попробуй ещё раз чуть позже.",
+      };
+    }
+  }
+
   const queries =
     identity.searchQueries.length >= 2
       ? identity.searchQueries.slice(0, 3)
