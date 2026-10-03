@@ -684,7 +684,7 @@ function sectionHasVerifiedData(
   const body = getSectionBody(text, heading, nextHeading);
   if (!body) return false;
 
-  return !/(подтверждённых свежих данных|подтверждённых свежих событий|свежие данные получить не удалось|нет данных)/i.test(
+  return !/(подтверждённых свежих данных|подтверждённых свежих событий|подтверждённых новых событий|свежие данные получить не удалось|нет данных)/i.test(
     body
   );
 }
