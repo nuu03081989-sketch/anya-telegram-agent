@@ -31,7 +31,7 @@ function extractOcrPageText(page: any) {
   ).trim();
 }
 
-async function recognizePdfWithYandexOcr(bytes: Buffer) {
+export async function startYandexPdfOcr(bytes: Buffer) {
   if (bytes.length > OCR_MAX_PDF_BYTES) {
     throw new Error("OCR_FILE_TOO_LARGE");
   }
@@ -44,17 +44,15 @@ async function recognizePdfWithYandexOcr(bytes: Buffer) {
     throw new Error("OCR_NOT_CONFIGURED");
   }
 
-  const headers = {
-    "Content-Type": "application/json",
-    Authorization: `Api-Key ${apiKey}`,
-    "x-folder-id": folderId,
-  };
-
   const startResponse = await fetch(
     "https://ai.api.cloud.yandex.net/ocr/v1/recognizeTextAsync",
     {
       method: "POST",
-      headers,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Api-Key ${apiKey}`,
+        "x-folder-id": folderId,
+      },
       body: JSON.stringify({
         mimeType: "application/pdf",
         languageCodes: ["*"],
@@ -81,49 +79,79 @@ async function recognizePdfWithYandexOcr(bytes: Buffer) {
     );
   }
 
-  const operationId = String(startData.id);
+  return String(startData.id);
+}
+
+export async function getYandexPdfOcrResult(operationId: string) {
+  const apiKey =
+    process.env.YANDEX_VISION_API_KEY || process.env.YANDEX_API_KEY;
+  const folderId = process.env.YANDEX_FOLDER_ID;
+
+  if (!apiKey || !folderId) {
+    throw new Error("OCR_NOT_CONFIGURED");
+  }
+
+  const resultResponse = await fetch(
+    `https://ai.api.cloud.yandex.net/ocr/v1/getRecognition?operationId=${encodeURIComponent(operationId)}`,
+    {
+      headers: {
+        Authorization: `Api-Key ${apiKey}`,
+        "x-folder-id": folderId,
+      },
+    }
+  );
+
+  const resultText = await resultResponse.text();
+
+  if (resultResponse.status === 401 || resultResponse.status === 403) {
+    throw new Error("OCR_PERMISSION_DENIED");
+  }
+
+  if (!resultResponse.ok) {
+    throw new Error(
+      `OCR_RESULT_FAILED: ${resultResponse.status} ${resultText.slice(0, 800)}`
+    );
+  }
+
+  if (!resultText.trim()) {
+    return { done: false as const };
+  }
+
+  const pages = resultText
+    .trim()
+    .split(/\r?\n/)
+    .flatMap((line) => {
+      try {
+        return [JSON.parse(line)];
+      } catch {
+        return [];
+      }
+    });
+
+  const recognized = pages
+    .map((page) => extractOcrPageText(page))
+    .filter(Boolean)
+    .join("\n\n");
+
+  if (!recognized.trim()) {
+    return { done: false as const };
+  }
+
+  return {
+    done: true as const,
+    text: recognized,
+  };
+}
+
+async function recognizePdfWithYandexOcr(bytes: Buffer) {
+  const operationId = await startYandexPdfOcr(bytes);
   const deadline = Date.now() + 220_000;
 
   while (Date.now() < deadline) {
-    const resultResponse = await fetch(
-      `https://ai.api.cloud.yandex.net/ocr/v1/getRecognition?operationId=${encodeURIComponent(operationId)}`,
-      {
-        headers: {
-          Authorization: `Api-Key ${apiKey}`,
-          "x-folder-id": folderId,
-        },
-      }
-    );
+    const result = await getYandexPdfOcrResult(operationId);
 
-    const resultText = await resultResponse.text();
-
-    if (
-      resultResponse.status === 401 ||
-      resultResponse.status === 403
-    ) {
-      throw new Error("OCR_PERMISSION_DENIED");
-    }
-
-    if (resultResponse.ok && resultText.trim()) {
-      const pages = resultText
-        .trim()
-        .split(/\r?\n/)
-        .flatMap((line) => {
-          try {
-            return [JSON.parse(line)];
-          } catch {
-            return [];
-          }
-        });
-
-      const recognized = pages
-        .map((page) => extractOcrPageText(page))
-        .filter(Boolean)
-        .join("\n\n");
-
-      if (recognized.trim()) {
-        return recognized;
-      }
+    if (result.done) {
+      return result.text;
     }
 
     await new Promise((resolve) => setTimeout(resolve, 3000));
@@ -383,6 +411,64 @@ async function splitPdfForYandexOcr(bytes: Buffer) {
   return chunks;
 }
 
+export type BackgroundOcrOperation = {
+  operationId: string;
+  startPage: number;
+  endPage: number;
+};
+
+export async function startDocumentBackgroundOcr(
+  fileName: string,
+  mimeType: string,
+  bytes: Buffer
+): Promise<BackgroundOcrOperation[] | null> {
+  const ext = documentExtension(fileName);
+  const isPdf = ext === "pdf" || mimeType === "application/pdf";
+
+  if (!isPdf) return null;
+
+  const pdfParse = require("pdf-parse/lib/pdf-parse.js");
+  const parsed = await pdfParse(bytes);
+  const embeddedText = String(parsed?.text || "").trim();
+
+  if (embeddedText.replace(/\s+/g, " ").length >= 80) {
+    return null;
+  }
+
+  let chunks: Array<{
+    bytes: Buffer;
+    startPage: number;
+    endPage: number;
+  }>;
+
+  if (bytes.length <= OCR_MAX_PDF_BYTES) {
+    const { PDFDocument } = require("pdf-lib");
+    const sourcePdf = await PDFDocument.load(bytes, {
+      ignoreEncryption: true,
+      updateMetadata: false,
+    });
+    const pageCount = Math.max(1, sourcePdf.getPageCount());
+
+    chunks = [
+      {
+        bytes,
+        startPage: 1,
+        endPage: pageCount,
+      },
+    ];
+  } else {
+    chunks = await splitPdfForYandexOcr(bytes);
+  }
+
+  return Promise.all(
+    chunks.map(async (chunk) => ({
+      operationId: await startYandexPdfOcr(chunk.bytes),
+      startPage: chunk.startPage,
+      endPage: chunk.endPage,
+    }))
+  );
+}
+
 async function recognizePdfPossiblyChunked(bytes: Buffer) {
   if (bytes.length <= OCR_MAX_PDF_BYTES) {
     return recognizePdfWithYandexOcr(bytes);
@@ -472,11 +558,11 @@ export function sanitizeDocumentMemory(text: string) {
     .replace(/\b\d{8}\b/g, "[идентификатор скрыт]");
 }
 
-async function analyzeDocument(
+export async function analyzeExtractedDocument(
   fileName: string,
   documentText: string,
-  userPrompt: string,
-  context: SkillContext
+  userPrompt = "",
+  context?: SkillContext
 ) {
   const apiKey = process.env.YANDEX_API_KEY;
   const folderId = process.env.YANDEX_FOLDER_ID;
@@ -502,7 +588,7 @@ async function analyzeDocument(
     "Проанализируй документ: кратко объясни, что это за документ, выдели главное, финансовые показатели, сроки, обязательства, риски и то, на что Ане стоит обратить внимание. Не переписывай полностью ИНН, КПП, ОГРН, номера банковских счетов, карт, паспортов, телефоны, email и другие реквизиты, если Аня прямо не попросила их показать. По умолчанию маскируй такие идентификаторы.";
 
   const systemPrompt =
-    context.systemPrompt ||
+    context?.systemPrompt ||
     [
       "Тебя зовут Саня. Ты мужчина и персональный ИИ-ассистент Ани.",
       "Пиши по-русски, кратко и по делу.",
@@ -527,7 +613,7 @@ async function analyzeDocument(
           role: "system",
           content: systemPrompt,
         },
-        ...(context.history || []).slice(-8),
+        ...(context?.history || []).slice(-8),
         {
           role: "system",
           content:
@@ -572,7 +658,7 @@ async function runDocumentAnalysis(
   const bytes = Buffer.from(context.documentBase64, "base64");
 
   const extracted = await extractDocumentText(fileName, mimeType, bytes);
-  const answer = await analyzeDocument(
+  const answer = await analyzeExtractedDocument(
     fileName,
     extracted,
     context.text,
