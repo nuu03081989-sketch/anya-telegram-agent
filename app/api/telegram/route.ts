@@ -4,6 +4,7 @@ import {
   WARDROBE_MOODBOARD_SYSTEM_RULE,
 } from "@/app/lib/wardrobe-image-rules";
 import { wardrobeSkill } from "@/app/skills/wardrobe";
+import { fashionTrendsSkill } from "@/app/skills/fashion-trends";
 import { researchModeLabel, researchSkill } from "@/app/skills/research";
 import { productFromPhotoSkill } from "@/app/skills/product-from-photo";
 import {
@@ -2276,6 +2277,33 @@ export async function POST(request: Request) {
       return Response.json({ ok: true });
     }
 
+    const fashionContext = {
+      chatId,
+      text,
+      replyText: repliedText,
+      history,
+    };
+    const fashionMatch =
+      await fashionTrendsSkill.handler?.match(fashionContext);
+
+    if (fashionMatch?.matched && fashionTrendsSkill.handler) {
+      await sendTelegramMessage(
+        chatId,
+        "Проверяю актуальные тренды и собираю носибельные сочетания..."
+      );
+
+      const result =
+        await fashionTrendsSkill.handler.run(fashionContext);
+      const answer =
+        result.text ||
+        "Аня, тренды нашёл, но итоговый ответ получился пустым. Попробуй ещё раз чуть позже.";
+
+      await sendTelegramMessage(chatId, answer);
+      await saveExchange(chatId, text, answer);
+
+      return Response.json({ ok: true, skill: "fashion-trends" });
+    }
+
     const navigationContext = {
       chatId,
       text,
@@ -2400,6 +2428,8 @@ export async function POST(request: Request) {
       message.includes("RESEARCH_SEARCH_TIMEOUT") ||
       message.includes("RESEARCH_PLAN_TIMEOUT") ||
       message.includes("RESEARCH_MODEL_TIMEOUT") ||
+      message.includes("FASHION_TRENDS_SEARCH_TIMEOUT") ||
+      message.includes("FASHION_TRENDS_MODEL_TIMEOUT") ||
       message.includes("PRODUCT_PHOTO_IDENTIFY_TIMEOUT") ||
       message.includes("PRODUCT_PHOTO_IDENTIFY_RETRY_TIMEOUT") ||
       message.includes("PRODUCT_PHOTO_SEARCH_TIMEOUT") ||
