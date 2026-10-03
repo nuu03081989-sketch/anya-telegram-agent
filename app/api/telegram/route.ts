@@ -3,6 +3,7 @@ import {
   buildWardrobeMoodboardSearch,
   WARDROBE_MOODBOARD_SYSTEM_RULE,
 } from "@/app/lib/wardrobe-image-rules";
+import { wardrobeSkill } from "@/app/skills/wardrobe";
 import { researchModeLabel, researchSkill } from "@/app/skills/research";
 import { productFromPhotoSkill } from "@/app/skills/product-from-photo";
 import {
@@ -2079,6 +2080,94 @@ export async function POST(request: Request) {
 
     if (isImageSearchQuery(text)) {
       await sendTelegramMessage(chatId, "Ищу изображения...");
+
+      const wardrobeContext = {
+        chatId,
+        text,
+        replyText: repliedText,
+        history,
+      };
+      const wardrobeMatch =
+        await wardrobeSkill.handler?.match(wardrobeContext);
+
+      if (wardrobeMatch?.matched && wardrobeSkill.handler) {
+        const result =
+          await wardrobeSkill.handler.run(wardrobeContext);
+        const queries = [...(result.imageQueries || [])];
+
+        if (queries.length === 0) {
+          await sendTelegramMessage(
+            chatId,
+            "Аня, вижу запрос на фото по гардеробной подборке, но в ответе, на который ты ссылаешься, не удалось надёжно выделить список вариантов. Пришли сам список одним сообщением."
+          );
+          return Response.json({ ok: true, skill: "wardrobe" });
+        }
+
+        let sent = 0;
+        const missing: string[] = [];
+        const usedUrls = new Set<string>();
+
+        for (const item of queries) {
+          let ok = false;
+          const attempts = Array.from(
+            new Set(
+              [
+                item.query,
+                item.fallbackQuery,
+                `${item.query} editorial fashion collage`,
+                item.fallbackQuery
+                  ? `${item.fallbackQuery} women outfit pinterest aesthetic`
+                  : "",
+              ].filter(Boolean)
+            )
+          );
+
+          for (const attempt of attempts) {
+            try {
+              const candidates = await searchImagesByText(attempt);
+              ok = await sendOneImageForQuery(
+                chatId,
+                attempt,
+                candidates,
+                item.label,
+                usedUrls
+              );
+            } catch (error) {
+              console.error("Wardrobe image search failed", error);
+            }
+
+            if (ok) break;
+          }
+
+          if (ok) sent += 1;
+          else missing.push(item.label);
+        }
+
+        if (sent === 0) {
+          await sendTelegramMessage(
+            chatId,
+            "Аня, гардеробный контекст понял правильно, но сами картинки Telegram сейчас не смог загрузить. Попробуй ещё раз чуть позже."
+          );
+        } else if (missing.length > 0) {
+          const answer =
+            `По гардеробной подборке отправил ${sent} из ${queries.length} фото. Не удалось: ${missing.join("; ")}.`;
+          await sendTelegramMessage(
+            chatId,
+            `Аня, отправил ${sent} из ${queries.length} вариантов. Не удалось загрузить: ${missing.join("; ")}. Неполную подборку готовой не считаю.`
+          );
+          await saveExchange(chatId, text, answer);
+        } else {
+          const answer =
+            `По гардеробной подборке отправил все ${sent} из ${queries.length} фото.`;
+          await saveExchange(chatId, text, answer);
+          await sendTelegramMessage(
+            chatId,
+            `Аня, готово: отправил все ${sent} из ${queries.length} вариантов.`
+          );
+        }
+
+        return Response.json({ ok: true, skill: "wardrobe" });
+      }
 
       if (isContextualImageRequest(text)) {
         const queries = contextualImageQueries(history, text, repliedText);
