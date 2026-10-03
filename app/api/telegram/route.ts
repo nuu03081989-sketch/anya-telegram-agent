@@ -2110,15 +2110,18 @@ export async function POST(request: Request) {
 
         for (const item of queries) {
           let ok = false;
+          const shortLabel = item.label.replace(
+            /^Вариант\s+\d+:\s*/i,
+            ""
+          );
           const attempts = Array.from(
             new Set(
               [
                 item.query,
                 item.fallbackQuery,
-                `${item.query} editorial fashion collage`,
-                item.fallbackQuery
-                  ? `${item.fallbackQuery} women outfit pinterest aesthetic`
-                  : "",
+                `${item.query} women full outfit street style`,
+                `${item.fallbackQuery} clothing editorial look`,
+                `${shortLabel} women outfit clothing street style`,
               ].filter(Boolean)
             )
           );
