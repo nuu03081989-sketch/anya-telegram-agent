@@ -28,3 +28,8 @@ A skill can become `native` only after:
 ## Next migration
 
 After Research is stable in production, migrate existing capabilities one by one instead of rewriting the Telegram route wholesale.
+
+
+## Product from photo
+
+The product-from-photo skill reuses the proven Telegram photo analysis path before running shopping search and match filtering.

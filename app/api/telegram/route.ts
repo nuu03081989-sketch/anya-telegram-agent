@@ -2475,7 +2475,7 @@ export async function POST(request: Request) {
 
       const base64Image = await downloadTelegramPhotoBase64(fileId);
 
-      const productPhotoContext = {
+      const initialProductPhotoContext = {
         chatId,
         text,
         replyText: repliedText,
@@ -2483,13 +2483,28 @@ export async function POST(request: Request) {
         imageBase64: base64Image,
       };
       const productPhotoMatch =
-        await productFromPhotoSkill.handler?.match(productPhotoContext);
+        await productFromPhotoSkill.handler?.match(initialProductPhotoContext);
 
       if (productPhotoMatch?.matched && productFromPhotoSkill.handler) {
         await sendTelegramMessage(
           chatId,
           "Распознаю товар, затем проверю варианты покупки и цены..."
         );
+
+        const imageDescription = await analyzeTelegramPhoto(
+          base64Image,
+          [
+            "Определи товар на фотографии для поиска в магазинах.",
+            "Ответь одной короткой фразой.",
+            "Укажи: что это за предмет; бренд или лицензию, только если видны; заметные надписи; цвет и форму.",
+            "Не придумывай модель, артикул или характеристики, которых не видно.",
+          ].join(" ")
+        );
+
+        const productPhotoContext = {
+          ...initialProductPhotoContext,
+          imageDescription,
+        };
 
         const result =
           await productFromPhotoSkill.handler.run(productPhotoContext);

@@ -31,6 +31,7 @@ export type SkillContext = {
   replyText?: string;
   history?: readonly SkillMessage[];
   imageBase64?: string;
+  imageDescription?: string;
 };
 
 export type SkillMatch = {
