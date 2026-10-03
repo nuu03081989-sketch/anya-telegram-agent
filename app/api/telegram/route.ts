@@ -1968,10 +1968,13 @@ export async function POST(request: Request) {
             chatId,
             "Аня, этот формат пока не читаю. Сейчас поддерживаю PDF, Word DOCX, Excel XLS/XLSX, CSV, TXT и Markdown."
           );
-        } else if (message.includes("OCR_SINGLE_PAGE_TOO_LARGE")) {
+        } else if (
+          message.includes("OCR_PAGE_COMPRESSION_UNSUPPORTED") ||
+          message.includes("OCR_PAGE_COMPRESSION_FAILED")
+        ) {
           await sendTelegramMessage(
             chatId,
-            "Аня, я попробовал автоматически разбить PDF, но внутри есть отдельная страница больше технического лимита OCR в 10 МБ. Простое деление по страницам тут уже не помогает. Следующий уровень решения - автоматически уменьшать такую страницу перед распознаванием."
+            "Аня, я дошёл до автоматического уменьшения тяжёлой страницы, но этот конкретный способ упаковки скана пока не удалось безопасно пересобрать для OCR. Файл не потерян, просто нужен ещё один технический fallback."
           );
         } else if (message.includes("OCR_FILE_TOO_LARGE")) {
           await sendTelegramMessage(
