@@ -676,6 +676,177 @@ function sanitizeCompetitorSection(text: string) {
   );
 }
 
+function splitSectionIntoSourceSegments(body: string) {
+  const matches = Array.from(body.matchAll(/https?:\/\/[^\s)]+/g));
+  if (matches.length === 0) return [] as Array<{ text: string; url: string }>;
+
+  const segments: Array<{ text: string; url: string }> = [];
+  let cursor = 0;
+
+  for (const match of matches) {
+    const matchIndex = match.index ?? cursor;
+    const segmentEnd = matchIndex + match[0].length;
+    const segment = body
+      .slice(cursor, segmentEnd)
+      .replace(/^[\s.;,:-]+/, "")
+      .trim();
+    cursor = segmentEnd;
+
+    if (segment) {
+      segments.push({ text: segment, url: match[0] });
+    }
+  }
+
+  return segments;
+}
+
+function russianMonthNumber(value: string) {
+  const month = value.toLowerCase();
+
+  if (month.startsWith("январ")) return 1;
+  if (month.startsWith("феврал")) return 2;
+  if (month.startsWith("март")) return 3;
+  if (month.startsWith("апрел")) return 4;
+  if (/^ма(?:й|я|е)$/.test(month)) return 5;
+  if (month.startsWith("июн")) return 6;
+  if (month.startsWith("июл")) return 7;
+  if (month.startsWith("август")) return 8;
+  if (month.startsWith("сентябр")) return 9;
+  if (month.startsWith("октябр")) return 10;
+  if (month.startsWith("ноябр")) return 11;
+  if (month.startsWith("декабр")) return 12;
+
+  return null;
+}
+
+function hasTooOldDemandPeriod(text: string, todayKey: string) {
+  const currentYear = Number(todayKey.slice(0, 4));
+  const currentMonth = Number(todayKey.slice(5, 7));
+  const currentIndex = currentYear * 12 + (currentMonth - 1);
+
+  const matches = Array.from(
+    text.matchAll(
+      /(январ[а-я]*|феврал[а-я]*|март[а-я]*|апрел[а-я]*|май|мая|мае|июн[а-я]*|июл[а-я]*|август[а-я]*|сентябр[а-я]*|октябр[а-я]*|ноябр[а-я]*|декабр[а-я]*)\s+(20\d{2})/gi
+    )
+  );
+
+  return matches.some((match) => {
+    const month = russianMonthNumber(match[1]);
+    const year = Number(match[2]);
+    if (!month || !Number.isFinite(year)) return false;
+
+    const periodIndex = year * 12 + (month - 1);
+    return currentIndex - periodIndex > 2;
+  });
+}
+
+function hasExpiredDeadline(text: string, todayKey: string) {
+  const todayNumber = Number(todayKey.replace(/-/g, ""));
+  const currentYear = Number(todayKey.slice(0, 4));
+
+  const matches = Array.from(
+    text.matchAll(
+      /(?:до|по)\s+(\d{1,2})\s+(января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)(?:\s+(20\d{2}))?/gi
+    )
+  );
+
+  return matches.some((match) => {
+    const day = Number(match[1]);
+    const month = russianMonthNumber(match[2]);
+    const year = match[3] ? Number(match[3]) : currentYear;
+
+    if (!month || !Number.isFinite(day) || !Number.isFinite(year)) return false;
+
+    const deadlineNumber = year * 10000 + month * 100 + day;
+    return deadlineNumber < todayNumber;
+  });
+}
+
+function hasDemandSignal(text: string) {
+  return /(ипотек|жилищн|ключев\w*\s+ставк|кредитован|ввод\w*\s+жиль|строительств|рынок\s+жиль|ремонт|новостро|застрой)/i.test(
+    text
+  );
+}
+
+function sanitizeDemandSection(text: string) {
+  const heading = "Спрос: стройка, ипотека, ремонт";
+  const nextHeading = "Налоги, кадры и законодательство";
+  const noData =
+    "Подтверждённых свежих и применимых к бизнесу данных по спросу, стройке и ипотеке не найдено.";
+  const body = getSectionBody(text, heading, nextHeading);
+  if (!body) return text;
+
+  const todayKey = krasnoyarskDateKey();
+  const allowedDomains = [
+    "cbr.ru",
+    "minstroyrf.gov.ru",
+    "rosstat.gov.ru",
+    "government.ru",
+    "xn--d1aqf.xn--p1ai",
+  ];
+
+  const kept = splitSectionIntoSourceSegments(body)
+    .filter(({ text: segment, url }) =>
+      urlMatchesAnyDomain(url, allowedDomains) &&
+      hasDemandSignal(segment) &&
+      !hasTooOldDemandPeriod(segment, todayKey) &&
+      !hasExpiredDeadline(segment, todayKey)
+    )
+    .map(({ text: segment }) => segment);
+
+  return replaceSectionBody(
+    text,
+    heading,
+    nextHeading,
+    kept.length > 0 ? kept.join("\n") : noData
+  );
+}
+
+function hasBusinessTaxHrSignal(text: string) {
+  return /(работодател|кадр|трудов|зарплат|ндфл|страхов\w*\s+взнос|мрот|персональн\w*\s+данн|воинск\w*\s+уч[её]т|миграц|ккт|касс|эдо|электронн\w*\s+документ|маркиров|импорт|пошлин|бухгалтер|отч[её]тност|налог\w*\s+на\s+прибыл|имущественн\w*\s+налог|усн|ндс|торговл|строительн\w*\s+материал)/i.test(
+    text
+  );
+}
+
+function isClearlyIrrelevantTaxHrItem(text: string) {
+  return /(товар\w*\s+для\s+детей|детск\w*\s+товар)/i.test(text) &&
+    !/(строительн\w*\s+материал|сантех|отоплен|плитк|керамогран|напольн|отделочн|освещен|работодател|кадр|трудов)/i.test(
+      text
+    );
+}
+
+function sanitizeTaxHrSection(text: string) {
+  const heading = "Налоги, кадры и законодательство";
+  const nextHeading = "Крупные государственные решения, влияющие на бизнес";
+  const noData =
+    "Подтверждённых свежих изменений, применимых к ESTRO как работодателю и торговой компании, не найдено.";
+  const body = getSectionBody(text, heading, nextHeading);
+  if (!body) return text;
+
+  const allowedDomains = [
+    "nalog.gov.ru",
+    "rostrud.gov.ru",
+    "publication.pravo.gov.ru",
+    "government.ru",
+  ];
+
+  const kept = splitSectionIntoSourceSegments(body)
+    .filter(({ text: segment, url }) =>
+      urlMatchesAnyDomain(url, allowedDomains) &&
+      hasBusinessTaxHrSignal(segment) &&
+      !isClearlyIrrelevantTaxHrItem(segment) &&
+      !hasExpiredDeadline(segment, krasnoyarskDateKey())
+    )
+    .map(({ text: segment }) => segment);
+
+  return replaceSectionBody(
+    text,
+    heading,
+    nextHeading,
+    kept.length > 0 ? kept.join("\n") : noData
+  );
+}
+
 function sectionHasVerifiedData(
   text: string,
   heading: string,
@@ -805,6 +976,8 @@ function enforceFinalSourcePolicy(text: string) {
   }
 
   result = sanitizeCompetitorSection(result);
+  result = sanitizeDemandSection(result);
+  result = sanitizeTaxHrSection(result);
 
   return result;
 }
@@ -846,6 +1019,8 @@ async function askYandexForBrief(context: string, previousBrief: string) {
             "В блоке «Рынок стройматериалов и конкуренты» отслеживай как конкурентов только Mela Rossa, Структура Света, A-Floor, DeArt, Мир декора, ЭлитСтрой и Kerama Marazzi. Другие компании не называй конкурентами ESTRO и не включай их действия в этот блок. Массовые розничные сети, включая Лемана ПРО, не являются объектом конкурентного мониторинга.",
             "Для конкурентов считай значимыми только новые события: акции и изменение условий, цены, новые бренды и коллекции, изменения ассортимента, открытия или закрытия, новые шоурумы, мероприятия для дизайнеров, новые сервисы, поставки и заметные изменения позиционирования. Не повторяй событие из предыдущего брифа без нового развития.",
             "Для блока конкурентов используй только официальные источники: mela-rossa.ru, strukturasveta.ru, wowsvet.ru, afloor.pro, deartfloor.ru, mir-dekora.clients.site, elitkras.ru, kerama-marazzi.com и прямой официальный профиль Mela Rossa vk.com/melarossahome. Не используй Zoon, 2ГИС, каталоги, агрегаторы, чужие соцсети и VK-ссылки, по которым нельзя подтвердить принадлежность официальному аккаунту. Обычное описание деятельности, ассортимента или факт работы с дизайнерами не считай свежим событием.",
+            "В блоке «Спрос: стройка, ипотека, ремонт» используй только свежие данные, способные повлиять на спрос ESTRO: ипотечные условия и ставки, выдачи ипотеки, ввод жилья, продажи новостроек, строительство и ремонт. Не включай условия программ, срок которых уже истёк на дату брифа. Данные за период старше двух календарных месяцев не выдавай за текущую ситуацию и не включай в ежедневный бриф.",
+            "В блоке «Налоги, кадры и законодательство» включай только изменения, которые реально применимы к ESTRO как работодателю, торговой компании или продавцу/импортёру строительных и интерьерных материалов: НДС общего характера, налог на прибыль/имущество, ККТ, ЭДО, маркировка, импорт и пошлины, отчётность, трудовое право, кадровый и воинский учёт, зарплата, НДФЛ, страховые взносы, персональные данные. Не включай отраслевые нормы для товаров и сфер, которыми ESTRO не занимается, например товары для детей, алкоголь, табак или лекарства.",
             "Различай вступившие в силу нормы, подписанные решения, проекты и обсуждения. Не называй проект действующим законом.",
             "Для каждого непустого блока «Топливо», «Рынок стройматериалов и конкуренты», «Спрос: стройка, ипотека, ремонт», «Налоги, кадры и законодательство» и «Крупные государственные решения, влияющие на бизнес» обязательно укажи хотя бы один URL источника именно из переданного контекста. Для законов, налогов, государственных решений, официальной статистики и топливных ограничений используй только первоисточники. Если первоисточника нет, напиши, что подтверждённых свежих данных нет.",
             "Используй точные заголовки и именно в таком порядке: Погода и логистика; Топливо; Курсы; Рынок стройматериалов и конкуренты; Спрос: стройка, ипотека, ремонт; Налоги, кадры и законодательство; Крупные государственные решения, влияющие на бизнес; Что изменилось со вчера; Саня считает важным сегодня.",
@@ -915,13 +1090,13 @@ async function buildMorningBrief() {
     ]),
 
     searchMany([
-      "site:cbr.ru ипотека жилищное кредитование ключевая ставка последние данные 2026",
-      "site:minstroyrf.gov.ru OR site:rosstat.gov.ru строительство жилье ввод жилья последние данные 2026",
+      "site:cbr.ru последние 30 дней ипотека жилищное кредитование выдачи ипотечных кредитов ставки сентябрь октябрь 2026. Только свежая публикация или свежие данные, без истёкших условий программ.",
+      "site:minstroyrf.gov.ru OR site:rosstat.gov.ru последние 30 дней Красноярский край Сибирь Россия строительство жилья ввод жилья продажи новостроек ремонт сентябрь октябрь 2026. Только свежие показатели, влияющие на спрос.",
     ]),
 
     searchMany([
-      "site:nalog.gov.ru с 1 октября 2026 изменения НДС налоги работодатели торговля последние публикации",
-      "site:rostrud.gov.ru OR site:publication.pravo.gov.ru с 1 октября 2026 кадровый учет трудовое законодательство работодатели изменения",
+      "site:nalog.gov.ru последние 30 дней НДС ККТ ЭДО маркировка импорт пошлины отчётность торговля строительные материалы работодатели изменения 2026. Исключи отраслевые нормы только для детских товаров, алкоголя, табака и лекарств.",
+      "site:rostrud.gov.ru OR site:publication.pravo.gov.ru последние 30 дней работодатели кадровый учет трудовое законодательство зарплата НДФЛ страховые взносы персональные данные воинский учет изменения 2026.",
     ]),
 
     searchMany([
