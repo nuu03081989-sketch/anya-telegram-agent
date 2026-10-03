@@ -53,7 +53,7 @@ export type SkillResult = {
   imageQueries?: readonly {
     label: string;
     query: string;
-    fallbackQuery?: string;
+    fallbackQuery: string;
   }[];
 };
 
