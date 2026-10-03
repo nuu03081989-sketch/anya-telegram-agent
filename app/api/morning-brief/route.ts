@@ -802,6 +802,65 @@ function sanitizeDemandSection(text: string) {
   );
 }
 
+function daysBetweenDateKeys(olderDateKey: string, newerDateKey: string) {
+  const older = Date.parse(`${olderDateKey}T00:00:00Z`);
+  const newer = Date.parse(`${newerDateKey}T00:00:00Z`);
+
+  if (!Number.isFinite(older) || !Number.isFinite(newer)) return 0;
+  return Math.floor((newer - older) / 86_400_000);
+}
+
+function parseRussianEffectiveDates(text: string, todayKey: string) {
+  const dates: string[] = [];
+  const currentYear = Number(todayKey.slice(0, 4));
+
+  for (const match of text.matchAll(
+    /(?:с|начиная\s+с)\s+(\d{1,2})\s+(января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)(?:\s+(20\d{2}))?/gi
+  )) {
+    const day = Number(match[1]);
+    const month = russianMonthNumber(match[2]);
+    const year = match[3] ? Number(match[3]) : currentYear;
+
+    if (!month || !Number.isFinite(day) || !Number.isFinite(year)) continue;
+    dates.push(
+      `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`
+    );
+  }
+
+  for (const match of text.matchAll(
+    /(?:с|начиная\s+с)\s+(\d{1,2})[./](\d{1,2})[./](20\d{2})/gi
+  )) {
+    const day = Number(match[1]);
+    const month = Number(match[2]);
+    const year = Number(match[3]);
+
+    if (
+      !Number.isFinite(day) ||
+      !Number.isFinite(month) ||
+      !Number.isFinite(year) ||
+      month < 1 ||
+      month > 12 ||
+      day < 1 ||
+      day > 31
+    ) {
+      continue;
+    }
+
+    dates.push(
+      `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`
+    );
+  }
+
+  return dates;
+}
+
+function hasOnlyStaleEffectiveDates(text: string, todayKey: string) {
+  const dates = parseRussianEffectiveDates(text, todayKey);
+  if (dates.length === 0) return false;
+
+  return dates.every((dateKey) => daysBetweenDateKeys(dateKey, todayKey) > 45);
+}
+
 function hasBusinessTaxHrSignal(text: string) {
   return /(работодател|кадр|трудов|зарплат|ндфл|страхов\w*\s+взнос|мрот|персональн\w*\s+данн|воинск\w*\s+уч[её]т|миграц|ккт|касс|эдо|электронн\w*\s+документ|маркиров|импорт|пошлин|бухгалтер|отч[её]тност|налог\w*\s+на\s+прибыл|имущественн\w*\s+налог|усн|ндс|торговл|строительн\w*\s+материал)/i.test(
     text
@@ -835,7 +894,8 @@ function sanitizeTaxHrSection(text: string) {
       urlMatchesAnyDomain(url, allowedDomains) &&
       hasBusinessTaxHrSignal(segment) &&
       !isClearlyIrrelevantTaxHrItem(segment) &&
-      !hasExpiredDeadline(segment, krasnoyarskDateKey())
+      !hasExpiredDeadline(segment, krasnoyarskDateKey()) &&
+      !hasOnlyStaleEffectiveDates(segment, krasnoyarskDateKey())
     )
     .map(({ text: segment }) => segment);
 
@@ -855,7 +915,7 @@ function sectionHasVerifiedData(
   const body = getSectionBody(text, heading, nextHeading);
   if (!body) return false;
 
-  return !/(подтверждённых свежих данных|подтверждённых свежих событий|подтверждённых новых событий|свежие данные получить не удалось|нет данных)/i.test(
+  return !/(подтверждённых\s+(?:свежих|новых)[^\n.]*?(?:не найдено|нет)|свежие данные получить не удалось|нет данных для этого блока)/i.test(
     body
   );
 }
@@ -1021,6 +1081,7 @@ async function askYandexForBrief(context: string, previousBrief: string) {
             "Для блока конкурентов используй только официальные источники: mela-rossa.ru, strukturasveta.ru, wowsvet.ru, afloor.pro, deartfloor.ru, mir-dekora.clients.site, elitkras.ru, kerama-marazzi.com и прямой официальный профиль Mela Rossa vk.com/melarossahome. Не используй Zoon, 2ГИС, каталоги, агрегаторы, чужие соцсети и VK-ссылки, по которым нельзя подтвердить принадлежность официальному аккаунту. Обычное описание деятельности, ассортимента или факт работы с дизайнерами не считай свежим событием.",
             "В блоке «Спрос: стройка, ипотека, ремонт» используй только свежие данные, способные повлиять на спрос ESTRO: ипотечные условия и ставки, выдачи ипотеки, ввод жилья, продажи новостроек, строительство и ремонт. Не включай условия программ, срок которых уже истёк на дату брифа. Данные за период старше двух календарных месяцев не выдавай за текущую ситуацию и не включай в ежедневный бриф.",
             "В блоке «Налоги, кадры и законодательство» включай только изменения, которые реально применимы к ESTRO как работодателю, торговой компании или продавцу/импортёру строительных и интерьерных материалов: НДС общего характера, налог на прибыль/имущество, ККТ, ЭДО, маркировка, импорт и пошлины, отчётность, трудовое право, кадровый и воинский учёт, зарплата, НДФЛ, страховые взносы, персональные данные. Не включай отраслевые нормы для товаров и сфер, которыми ESTRO не занимается, например товары для детей, алкоголь, табак или лекарства.",
+            "Для ежедневного блока налогов и кадров не повторяй нормы, которые вступили в силу более 45 дней назад, даже если поисковик снова показал старое разъяснение. Исключение: свежая официальная публикация должна содержать новое изменение, новый срок, новое разъяснение или новое обязательное действие для бизнеса.",
             "Различай вступившие в силу нормы, подписанные решения, проекты и обсуждения. Не называй проект действующим законом.",
             "Для каждого непустого блока «Топливо», «Рынок стройматериалов и конкуренты», «Спрос: стройка, ипотека, ремонт», «Налоги, кадры и законодательство» и «Крупные государственные решения, влияющие на бизнес» обязательно укажи хотя бы один URL источника именно из переданного контекста. Для законов, налогов, государственных решений, официальной статистики и топливных ограничений используй только первоисточники. Если первоисточника нет, напиши, что подтверждённых свежих данных нет.",
             "Используй точные заголовки и именно в таком порядке: Погода и логистика; Топливо; Курсы; Рынок стройматериалов и конкуренты; Спрос: стройка, ипотека, ремонт; Налоги, кадры и законодательство; Крупные государственные решения, влияющие на бизнес; Что изменилось со вчера; Саня считает важным сегодня.",
@@ -1095,7 +1156,7 @@ async function buildMorningBrief() {
     ]),
 
     searchMany([
-      "site:nalog.gov.ru последние 30 дней НДС ККТ ЭДО маркировка импорт пошлины отчётность торговля строительные материалы работодатели изменения 2026. Исключи отраслевые нормы только для детских товаров, алкоголя, табака и лекарств.",
+      "site:nalog.gov.ru опубликовано последние 30 дней сентябрь октябрь 2026 изменения с сентября октября ноября 2026 НДС ККТ ЭДО маркировка импорт пошлины отчётность торговля работодатели. Не показывай обзоры старых изменений, вступивших в силу в январе 2026, если в публикации нет нового правила или нового действия для бизнеса.",
       "site:rostrud.gov.ru OR site:publication.pravo.gov.ru последние 30 дней работодатели кадровый учет трудовое законодательство зарплата НДФЛ страховые взносы персональные данные воинский учет изменения 2026.",
     ]),
 
