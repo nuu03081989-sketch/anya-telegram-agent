@@ -1,3 +1,4 @@
+export { researchSkill, detectResearchMode, researchModeLabel } from "./research";
 export { SKILLS } from "./catalog";
 export {
   getSkill,
@@ -12,6 +13,7 @@ export type {
   SkillHandler,
   SkillId,
   SkillMatch,
+  SkillMessage,
   SkillResult,
   SkillStatus,
 } from "./types";
