@@ -1,3 +1,4 @@
+export { wardrobeSkill, isWardrobeContextualImageRequest } from "./wardrobe";
 export { morningBriefSkill, morningBriefAction } from "./morning-brief";
 export { navigationSkill, isNavigationQuery, isTrafficQuery } from "./navigation";
 export { expenseControlSkill } from "./expense-control";
