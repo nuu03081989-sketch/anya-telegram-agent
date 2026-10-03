@@ -15,6 +15,15 @@ type SearchHit = {
   query: string;
 };
 
+type EvidenceProfile = {
+  currentIntent: boolean;
+  localIntent: boolean;
+  freshCount: number;
+  localCount: number;
+  officialCount: number;
+  strongCount: number;
+};
+
 const MODE_QUERY_COUNT: Record<ResearchMode, number> = {
   quick: 1,
   standard: 3,
@@ -26,6 +35,98 @@ const MODE_LABEL: Record<ResearchMode, string> = {
   standard: "стандартный",
   deep: "глубокий",
 };
+
+const LOW_VALUE_HOSTS = [
+  "dzen.ru",
+  "zen.yandex.ru",
+  "avito.ru",
+  "otzovik.com",
+  "irecommend.ru",
+  "pikabu.ru",
+] as const;
+
+const OFFICIAL_HOSTS = [
+  "cbr.ru",
+  "rosstat.gov.ru",
+  "24.rosstat.gov.ru",
+  "fedstat.ru",
+  "minstroyrf.gov.ru",
+  "government.ru",
+  "nalog.gov.ru",
+  "publication.pravo.gov.ru",
+] as const;
+
+function krasnoyarskYear() {
+  return Number(
+    new Intl.DateTimeFormat("en", {
+      timeZone: "Asia/Krasnoyarsk",
+      year: "numeric",
+    }).format(new Date())
+  );
+}
+
+function normalizedHost(url: string) {
+  try {
+    return new URL(url).hostname.toLowerCase().replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+}
+
+function hostMatches(host: string, domain: string) {
+  return host === domain || host.endsWith(`.${domain}`);
+}
+
+function isLowValueSource(url: string) {
+  const host = normalizedHost(url);
+  return LOW_VALUE_HOSTS.some((domain) => hostMatches(host, domain));
+}
+
+function isOfficialSource(url: string) {
+  const host = normalizedHost(url);
+
+  return (
+    OFFICIAL_HOSTS.some((domain) => hostMatches(host, domain)) ||
+    host.endsWith(".gov.ru")
+  );
+}
+
+function isCurrentResearch(subject: string) {
+  return /(?:текущ|сейчас|сегодня|последн|свеж|актуальн|тенденц|динамик|в\s+20\d{2}\s+год|рынок\s+20\d{2})/i.test(
+    subject
+  );
+}
+
+function isLocalResearch(subject: string) {
+  return /(?:красноярск|красноярск\w*\s+кра)/i.test(subject);
+}
+
+function textYears(hit: SearchHit) {
+  const years = [
+    ...hit.title.matchAll(/\b(20\d{2})\b/g),
+    ...hit.snippet.matchAll(/\b(20\d{2})\b/g),
+  ].map((match) => Number(match[1]));
+
+  return [...new Set(years)].filter(Number.isFinite);
+}
+
+function isClearlyStale(hit: SearchHit, currentYear: number) {
+  const years = textYears(hit);
+  if (years.length === 0) return false;
+
+  return Math.max(...years) < currentYear - 1;
+}
+
+function looksLocal(hit: SearchHit) {
+  const text = `${hit.title} ${hit.snippet} ${hit.url} ${hit.query}`;
+  return /(?:красноярск|krasnoyarsk|24\.rosstat)/i.test(text);
+}
+
+function looksFresh(hit: SearchHit, currentYear: number) {
+  const years = textYears(hit);
+  if (years.length === 0) return false;
+  return years.some((year) => year >= currentYear - 1);
+}
 
 function fetchWithTimeout(
   url: string,
@@ -120,13 +221,18 @@ function recentContext(context: SkillContext) {
 
 function fallbackQueries(subject: string, mode: ResearchMode) {
   const base = subject.replace(/\s+/g, " ").trim();
+  const year = krasnoyarskYear();
+  const local = isLocalResearch(subject) ? "Красноярск" : "";
+
   const candidates = [
-    base,
-    `${base} официальные источники последние данные`,
-    `${base} сравнение факты рынок риски`,
-    `${base} независимый обзор данные статистика`,
-    `${base} цены условия изменения последние новости`,
-  ];
+    `${base} ${year}`,
+    `${base} ${year} официальные источники статистика`,
+    `${base} ${local} ${year} Росстат Банк России Минстрой`,
+    `${base} ${year} отраслевой рынок продажи цены`,
+    `${base} ${year} риски изменение спроса`,
+  ]
+    .map((query) => query.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
 
   return candidates.slice(0, MODE_QUERY_COUNT[mode]);
 }
@@ -143,6 +249,7 @@ async function planQueries(
   if (!apiKey || !folderId) return fallbackQueries(subject, mode);
 
   const count = MODE_QUERY_COUNT[mode];
+  const currentYear = krasnoyarskYear();
 
   try {
     const response = await fetchWithTimeout(
@@ -165,7 +272,9 @@ async function planQueries(
                 "Составь поисковый план для веб-исследования.",
                 `Нужно ровно ${count} разных поисковых запросов.`,
                 "Запросы должны проверять тему с разных сторон: первоисточники, факты/цифры, альтернативные оценки или риски.",
-                "Для актуальной темы добавляй признаки свежести: текущий год, последние данные или последние публикации.",
+                `Текущий год в Красноярске: ${currentYear}. Для текущей темы обязательно ищи данные ${currentYear} года или, если их нет, максимум ${currentYear - 1} года.`,
+                "Для рыночного исследования минимум один запрос направь на официальную статистику или первоисточник, один на локальные данные, если указан город/регион, и один на независимый отраслевой источник.",
+                "Не используй Дзен, Avito, отзывы и пользовательские площадки как основу фактического вывода.",
                 "Если тема касается ESTRO, учитывай Красноярск, средний/средний+ сегмент, чек от 500 000 рублей, сантехнику, отопление, отделочные материалы, полы, плитку, керамогранит и освещение.",
                 "Верни только JSON-массив строк, без пояснений и markdown.",
               ].join("\n"),
@@ -287,39 +396,87 @@ async function searchOne(queryText: string): Promise<SearchHit[]> {
     .filter((item) => /^https?:\/\//i.test(item.url));
 }
 
-function hostQuality(url: string) {
-  try {
-    const host = new URL(url).hostname.toLowerCase();
-    if (
-      /(?:^|\.)(?:gov\.ru|cbr\.ru|nalog\.gov\.ru|rosstat\.gov\.ru)$/.test(
-        host
-      )
-    ) {
-      return 3;
-    }
-    if (/\.gov\.ru$/.test(host)) return 3;
-    if (/\.(?:ru|com|org|net)$/.test(host)) return 1;
-  } catch {}
+function hostQuality(hit: SearchHit, subject: string) {
+  const host = normalizedHost(hit.url);
+  if (!host || isLowValueSource(hit.url)) return -100;
 
-  return 0;
+  let score = 0;
+
+  if (isOfficialSource(hit.url)) score += 8;
+  else if (/\.(?:ru|com|org|net)$/.test(host)) score += 2;
+
+  if (isLocalResearch(subject) && looksLocal(hit)) score += 4;
+
+  const currentYear = krasnoyarskYear();
+  if (isCurrentResearch(subject)) {
+    if (isClearlyStale(hit, currentYear)) score -= 8;
+    else if (looksFresh(hit, currentYear)) score += 4;
+  }
+
+  if (/глобальн|global market/i.test(`${hit.title} ${hit.snippet}`)) {
+    score -= 3;
+  }
+
+  return score;
 }
 
-function selectSources(allHits: SearchHit[], mode: ResearchMode) {
+function selectSources(
+  allHits: SearchHit[],
+  mode: ResearchMode,
+  subject: string
+) {
   const byUrl = new Map<string, SearchHit>();
 
   for (const hit of allHits) {
-    if (!byUrl.has(hit.url)) byUrl.set(hit.url, hit);
+    if (!byUrl.has(hit.url) && !isLowValueSource(hit.url)) {
+      byUrl.set(hit.url, hit);
+    }
   }
 
-  const unique = [...byUrl.values()].sort(
-    (a, b) => hostQuality(b.url) - hostQuality(a.url)
-  );
+  const unique = [...byUrl.values()]
+    .filter(
+      (hit) =>
+        !(
+          isCurrentResearch(subject) &&
+          isClearlyStale(hit, krasnoyarskYear())
+        )
+    )
+    .sort(
+      (a, b) => hostQuality(b, subject) - hostQuality(a, subject)
+    );
 
   const limit = mode === "quick" ? 5 : mode === "deep" ? 10 : 8;
   return unique.slice(0, limit);
 }
 
-async function collectSources(queries: string[], mode: ResearchMode) {
+function evidenceProfile(subject: string, hits: SearchHit[]): EvidenceProfile {
+  const currentYear = krasnoyarskYear();
+  const currentIntent = isCurrentResearch(subject);
+  const localIntent = isLocalResearch(subject);
+  const freshCount = hits.filter((hit) => looksFresh(hit, currentYear)).length;
+  const localCount = hits.filter(looksLocal).length;
+  const officialCount = hits.filter((hit) => isOfficialSource(hit.url)).length;
+  const strongCount = hits.filter(
+    (hit) =>
+      hostQuality(hit, subject) >= 4 &&
+      (!currentIntent || !isClearlyStale(hit, currentYear))
+  ).length;
+
+  return {
+    currentIntent,
+    localIntent,
+    freshCount,
+    localCount,
+    officialCount,
+    strongCount,
+  };
+}
+
+async function collectSources(
+  queries: string[],
+  mode: ResearchMode,
+  subject: string
+) {
   const allHits: SearchHit[] = [];
 
   for (let index = 0; index < queries.length; index += 1) {
@@ -334,7 +491,7 @@ async function collectSources(queries: string[], mode: ResearchMode) {
     }
   }
 
-  return selectSources(allHits, mode);
+  return selectSources(allHits, mode, subject);
 }
 
 function sourcePack(hits: SearchHit[]) {
@@ -353,6 +510,7 @@ async function synthesizeResearch(
   hits: SearchHit[],
   contextText: string
 ) {
+  const evidence = evidenceProfile(subject, hits);
   const apiKey = process.env.YANDEX_API_KEY;
   const folderId = process.env.YANDEX_FOLDER_ID;
 
@@ -381,6 +539,9 @@ async function synthesizeResearch(
               "Не выдумывай факты, цифры, даты и ссылки. Если источники расходятся, явно укажи противоречие и не выбирай удобную версию без оснований.",
               "Для текущих данных обращай внимание на дату и свежесть. Старый материал не выдавай за текущий.",
               "Первоисточники и официальные публикации важнее пересказов и агрегаторов, но независимые источники используй для проверки и альтернативной точки зрения.",
+              "Не делай вывод «спрос растёт», «рынок стабилен», «рынок падает» или иной направленный рыночный вывод, если в источниках нет свежих данных, которые прямо показывают такую динамику.",
+              "Не переносись от данных по России или миру к Красноярску как будто это одно и то же. Если локальных данных нет, прямо напиши, что локальный тренд не подтверждён.",
+              "Если свежих сильных источников недостаточно, ответ должен начинаться с ограничения данных, а не с уверенного вывода.",
               "Если запрос касается ESTRO, учитывай: Красноярск, средний/средний+ сегмент, средний заказ от 500 000 рублей; категории - сантехника, отопление, отделочные материалы, напольные покрытия, плитка, керамогранит, освещение.",
               "Не относись к массовым строительным гипермаркетам как к прямым конкурентам ESTRO без явного основания.",
               "Ответ по-русски, без эмодзи и длинного тире. Не используй выдуманные цитаты.",
@@ -399,6 +560,13 @@ async function synthesizeResearch(
             content: [
               `Тема исследования: ${subject}`,
               `Режим: ${MODE_LABEL[mode]}`,
+              `Профиль доказательств: свежих источников с явным годом ${evidence.freshCount}; локальных ${evidence.localCount}; официальных ${evidence.officialCount}; сильных ${evidence.strongCount}.`,
+              evidence.currentIntent && evidence.freshCount === 0
+                ? "ОГРАНИЧЕНИЕ: запрос про текущую ситуацию, но в отобранных источниках нет явно свежих данных. Нельзя делать уверенный текущий вывод."
+                : "",
+              evidence.localIntent && evidence.localCount === 0
+                ? "ОГРАНИЧЕНИЕ: запрос локальный, но локальных источников нет. Нельзя выдавать общероссийский или глобальный тренд за Красноярск."
+                : "",
               contextText ? `Контекст диалога: ${contextText}` : "",
               "",
               "ИСТОЧНИКИ:",
@@ -454,13 +622,26 @@ async function runResearch(context: SkillContext): Promise<SkillResult> {
   const mode = detectResearchMode(context.text);
   const contextText = recentContext(context);
   const queries = await planQueries(subject, mode, contextText);
-  const hits = await collectSources(queries, mode);
+  const hits = await collectSources(queries, mode, subject);
 
   if (hits.length === 0) {
     return {
       handled: true,
       text:
-        "Аня, исследование запустил, но Yandex Search не вернул пригодных источников. Я не буду заполнять ответ догадками. Попробуй сформулировать тему чуть уже.",
+        "Аня, исследование запустил, но после фильтра свежести и качества не осталось пригодных источников. Я не буду заменять данные Дзеном, объявлениями или старыми обзорами. Попробуй сформулировать тему чуть шире или запусти глубокий режим.",
+    };
+  }
+
+  const evidence = evidenceProfile(subject, hits);
+  if (
+    mode !== "deep" &&
+    ((evidence.currentIntent && evidence.freshCount === 0) ||
+      (evidence.localIntent && evidence.localCount === 0))
+  ) {
+    return {
+      handled: true,
+      text:
+        "Аня, по этой формулировке я не нашёл достаточно свежих локальных данных для уверенного вывода. Общероссийские и старые материалы за Красноярск выдавать не буду. Для следующей попытки лучше запустить /research deep по той же теме.",
     };
   }
 
