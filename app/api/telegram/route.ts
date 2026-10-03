@@ -1,6 +1,4 @@
 import { createClient } from "redis";
-import { formatExpenseOverview } from "@/app/lib/expense-control";
-import { getYandexBillingSummary } from "@/app/lib/yandex-billing";
 import {
   formatKrasnoyarskTraffic,
   getKrasnoyarskTraffic,
@@ -15,6 +13,7 @@ import {
   documentAnalysisSkill,
   sanitizeDocumentMemory,
 } from "@/app/skills/document-analysis";
+import { expenseControlSkill } from "@/app/skills/expense-control";
 
 export const runtime = "nodejs";
 
@@ -1966,55 +1965,39 @@ export async function POST(request: Request) {
   }
 
   if (text === "/expenses") {
-    let yandexBilling = null;
-    let billingDiagnostic = "";
+    const expenseContext = {
+      chatId,
+      text,
+      replyText: repliedText,
+    };
+    const match =
+      await expenseControlSkill.handler?.match(expenseContext);
 
-    try {
-      yandexBilling = await getYandexBillingSummary();
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "unknown error";
-
-      console.error("Could not read Yandex Billing", message);
-
-      if (message.includes("YANDEX_SERVICE_ACCOUNT_KEY_JSON is missing")) {
-        billingDiagnostic = "KEY_MISSING";
-      } else if (message.includes("not valid JSON")) {
-        billingDiagnostic = "KEY_JSON_INVALID";
-      } else if (message.includes("incomplete key data")) {
-        billingDiagnostic = "KEY_INCOMPLETE";
-      } else if (message.startsWith("Yandex IAM token request failed:")) {
-        const status = message.match(/failed:\s*(\d+)/)?.[1] || "UNKNOWN";
-        billingDiagnostic = `IAM_HTTP_${status}`;
-      } else if (message.startsWith("Yandex Billing account list failed:")) {
-        const status = message.match(/failed:\s*(\d+)/)?.[1] || "UNKNOWN";
-        billingDiagnostic = `ACCOUNT_LIST_HTTP_${status}`;
-      } else if (message.includes("No active Yandex Billing account")) {
-        billingDiagnostic = "ACCOUNT_NOT_FOUND";
-      } else if (message.includes("More than one active Yandex Billing account")) {
-        billingDiagnostic = "ACCOUNT_MULTIPLE";
-      } else if (message.startsWith("Yandex Billing gRPC HTTP status")) {
-        const status = message.match(/status\s+(\d+)/)?.[1] || "UNKNOWN";
-        billingDiagnostic = `USAGE_HTTP_${status}`;
-      } else if (message.startsWith("Yandex Billing gRPC failed:")) {
-        const status = message.match(/failed:\s*(\d+)/)?.[1] || "UNKNOWN";
-        billingDiagnostic = `USAGE_GRPC_${status}`;
-      } else if (message.includes("gRPC")) {
-        billingDiagnostic = "USAGE_GRPC_PROTOCOL";
-      } else {
-        billingDiagnostic = "UNKNOWN";
-      }
+    if (!match?.matched || !expenseControlSkill.handler) {
+      await sendTelegramMessage(
+        chatId,
+        "Аня, Skill контроля расходов сейчас не активировался. Попробуй ещё раз чуть позже."
+      );
+      return Response.json({ ok: true, skill: "expense-control" });
     }
 
-    const report = formatExpenseOverview(new Date(), yandexBilling);
+    try {
+      const result =
+        await expenseControlSkill.handler.run(expenseContext);
+      await sendTelegramMessage(
+        chatId,
+        result.text ||
+          "Аня, отчёт по расходам собрался без текста. Попробуй ещё раз чуть позже."
+      );
+    } catch (error) {
+      console.error("Expense control skill failed", error);
+      await sendTelegramMessage(
+        chatId,
+        "Аня, сейчас не смог собрать отчёт по расходам. Данные подписок сохранены, но Billing Yandex Cloud мог временно не ответить."
+      );
+    }
 
-    await sendTelegramMessage(
-      chatId,
-      billingDiagnostic
-        ? `${report}\n\nДиагностика Yandex Cloud: ${billingDiagnostic}`
-        : report
-    );
-    return Response.json({ ok: true });
+    return Response.json({ ok: true, skill: "expense-control" });
   }
 
   if (text === "/usage") {

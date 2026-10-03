@@ -1,4 +1,5 @@
 import { documentAnalysisSkill } from "./document-analysis";
+import { expenseControlSkill } from "./expense-control";
 import { productFromPhotoSkill } from "./product-from-photo";
 import { researchSkill } from "./research";
 import { defineSkill } from "./types";
@@ -17,16 +18,7 @@ export const SKILLS = [
   researchSkill,
   productFromPhotoSkill,
   documentAnalysisSkill,
-  defineSkill({
-    id: "expense-control",
-    title: "Контроль расходов",
-    description:
-      "Учёт подписок, облачных расходов, бюджетных порогов и напоминаний.",
-    status: "legacy",
-    costProfile: "no-new-cost",
-    triggerHints: ["расходы", "подписки", "бюджет", "сколько потрачено"],
-    dependencies: ["Yandex Billing", "Redis"],
-  }),
+  expenseControlSkill,
   defineSkill({
     id: "navigation",
     title: "Навигация",
