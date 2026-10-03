@@ -82,7 +82,7 @@ async function recognizePdfWithYandexOcr(bytes: Buffer) {
   }
 
   const operationId = String(startData.id);
-  const deadline = Date.now() + 70_000;
+  const deadline = Date.now() + 220_000;
 
   while (Date.now() < deadline) {
     const resultResponse = await fetch(
@@ -126,7 +126,7 @@ async function recognizePdfWithYandexOcr(bytes: Buffer) {
       }
     }
 
-    await new Promise((resolve) => setTimeout(resolve, 2000));
+    await new Promise((resolve) => setTimeout(resolve, 3000));
   }
 
   throw new Error("OCR_TIMEOUT");

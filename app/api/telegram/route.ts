@@ -19,6 +19,7 @@ import {
 } from "@/app/skills/morning-brief";
 
 export const runtime = "nodejs";
+export const maxDuration = 300;
 
 const TELEGRAM_API = "https://api.telegram.org";
 const YANDEX_API = "https://ai.api.cloud.yandex.net/v1/chat/completions";
@@ -1992,7 +1993,7 @@ export async function POST(request: Request) {
         } else if (message.includes("OCR_TIMEOUT")) {
           await sendTelegramMessage(
             chatId,
-            "Аня, OCR запустился, но не успел закончить распознавание за отведённое время. Попробуй ещё раз или пришли PDF меньшими частями."
+            "Аня, OCR запустился, но даже за расширенное окно ожидания не успел закончить распознавание. Файл уже подготовлен правильно, поэтому следующий шаг будет не делить его вручную, а вынести ожидание долгого OCR из Telegram-запроса."
           );
         } else if (message.includes("DOCUMENT_HAS_NO_TEXT")) {
           await sendTelegramMessage(
