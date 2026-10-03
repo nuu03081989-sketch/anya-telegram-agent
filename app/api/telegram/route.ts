@@ -2488,7 +2488,7 @@ export async function POST(request: Request) {
       if (productPhotoMatch?.matched && productFromPhotoSkill.handler) {
         await sendTelegramMessage(
           chatId,
-          "Распознаю товар и ищу, где его купить..."
+          "Распознаю товар, затем проверю варианты покупки и цены..."
         );
 
         const result =
@@ -2784,12 +2784,27 @@ export async function POST(request: Request) {
       message.includes("RESEARCH_PLAN_TIMEOUT") ||
       message.includes("RESEARCH_MODEL_TIMEOUT") ||
       message.includes("PRODUCT_PHOTO_IDENTIFY_TIMEOUT") ||
+      message.includes("PRODUCT_PHOTO_IDENTIFY_RETRY_TIMEOUT") ||
       message.includes("PRODUCT_PHOTO_SEARCH_TIMEOUT") ||
       message.includes("PRODUCT_PHOTO_MODEL_TIMEOUT")
     ) {
       await sendTelegramMessage(
         chatId,
         "Аня, этот запрос не успел завершиться за отведённое время. Я не продолжаю его в фоне. Пришли задачу ещё раз, а если подборка большая, лучше разобьём её на части."
+      );
+    } else if (message.includes("PRODUCT_PHOTO_")) {
+      const stage =
+        message.includes("IDENTIFY")
+          ? "распознавание товара"
+          : message.includes("SEARCH")
+            ? "поиск вариантов покупки"
+            : message.includes("MODEL")
+              ? "сборка итогового ответа"
+              : "обработка товара по фото";
+
+      await sendTelegramMessage(
+        chatId,
+        `Аня, новая версия Skill «Товар по фото» уже работает, но произошёл сбой на этапе: ${stage}. Я не буду маскировать его общей фразой про Yandex Cloud. Пришли этот ответ мне, и я добью конкретный этап.`
       );
     } else {
       await sendTelegramMessage(
