@@ -1,5 +1,6 @@
 export type SkillId =
   | "wardrobe"
+  | "fashion-trends"
   | "research"
   | "product-from-photo"
   | "document-analysis"
