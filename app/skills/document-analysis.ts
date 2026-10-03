@@ -159,6 +159,146 @@ async function createPdfChunk(
   return Buffer.from(saved);
 }
 
+async function rebuildOversizedScannedPageForOcr(
+  sourcePdf: any,
+  pageIndex: number
+) {
+  const {
+    PDFDocument,
+    PDFDict,
+    PDFName,
+    PDFRawStream,
+  } = require("pdf-lib");
+  const sharp = require("sharp");
+
+  const sourcePage = sourcePdf.getPage(pageIndex);
+  const resources = sourcePage.node.Resources();
+  const xObjects = resources?.lookupMaybe(
+    PDFName.of("XObject"),
+    PDFDict
+  );
+
+  if (!xObjects) {
+    throw new Error("OCR_PAGE_COMPRESSION_UNSUPPORTED");
+  }
+
+  let largestJpeg: Buffer | undefined;
+
+  for (const key of xObjects.keys()) {
+    const candidate = xObjects.lookup(key);
+
+    if (!(candidate instanceof PDFRawStream)) {
+      continue;
+    }
+
+    const subtype = String(
+      candidate.dict.get(PDFName.of("Subtype")) || ""
+    );
+    const filter = String(
+      candidate.dict.get(PDFName.of("Filter")) || ""
+    );
+
+    if (
+      !subtype.includes("Image") ||
+      !filter.includes("DCTDecode")
+    ) {
+      continue;
+    }
+
+    const imageBytes = Buffer.from(candidate.contents);
+
+    if (!largestJpeg || imageBytes.length > largestJpeg.length) {
+      largestJpeg = imageBytes;
+    }
+  }
+
+  if (!largestJpeg) {
+    throw new Error("OCR_PAGE_COMPRESSION_UNSUPPORTED");
+  }
+
+  const metadata = await sharp(largestJpeg).metadata();
+  const width = Number(metadata.width || 0);
+  const height = Number(metadata.height || 0);
+
+  if (!width || !height) {
+    throw new Error("OCR_PAGE_COMPRESSION_FAILED");
+  }
+
+  const maxPixels = 12_000_000;
+  const maxDimension = 7000;
+  const pixelScale =
+    width * height > maxPixels
+      ? Math.sqrt(maxPixels / (width * height))
+      : 1;
+  const dimensionScale = Math.min(
+    1,
+    maxDimension / Math.max(width, height)
+  );
+  let scale = Math.min(1, pixelScale, dimensionScale);
+
+  const attempts = [
+    { quality: 78, scaleMultiplier: 1 },
+    { quality: 68, scaleMultiplier: 1 },
+    { quality: 60, scaleMultiplier: 0.9 },
+    { quality: 54, scaleMultiplier: 0.8 },
+  ];
+
+  for (const attempt of attempts) {
+    const currentScale = Math.min(
+      scale,
+      scale * attempt.scaleMultiplier
+    );
+    const targetWidth = Math.max(
+      900,
+      Math.round(width * currentScale)
+    );
+    const targetHeight = Math.max(
+      900,
+      Math.round(height * currentScale)
+    );
+
+    const jpeg = await sharp(largestJpeg)
+      .rotate()
+      .resize(targetWidth, targetHeight, {
+        fit: "inside",
+        withoutEnlargement: true,
+      })
+      .jpeg({
+        quality: attempt.quality,
+        mozjpeg: true,
+      })
+      .toBuffer();
+
+    const rebuilt = await PDFDocument.create();
+    const embedded = await rebuilt.embedJpg(jpeg);
+    const size = sourcePage.getSize();
+    const page = rebuilt.addPage([size.width, size.height]);
+
+    page.drawImage(embedded, {
+      x: 0,
+      y: 0,
+      width: size.width,
+      height: size.height,
+    });
+
+    const saved = Buffer.from(
+      await rebuilt.save({
+        useObjectStreams: true,
+        addDefaultPage: false,
+        objectsPerTick: 50,
+      })
+    );
+
+    if (saved.length <= OCR_CHUNK_TARGET_BYTES) {
+      return saved;
+    }
+
+    scale *= 0.9;
+  }
+
+  throw new Error("OCR_PAGE_COMPRESSION_FAILED");
+}
+
 async function splitPdfForYandexOcr(bytes: Buffer) {
   const { PDFDocument } = require("pdf-lib");
   const sourcePdf = await PDFDocument.load(bytes, {
@@ -218,12 +358,16 @@ async function splitPdfForYandexOcr(bytes: Buffer) {
         startPageIndex + 1
       );
 
-      if (singlePage.length > OCR_MAX_PDF_BYTES) {
-        throw new Error("OCR_SINGLE_PAGE_TOO_LARGE");
-      }
+      const pageBytes =
+        singlePage.length > OCR_MAX_PDF_BYTES
+          ? await rebuildOversizedScannedPageForOcr(
+              sourcePdf,
+              startPageIndex
+            )
+          : singlePage;
 
       best = {
-        bytes: singlePage,
+        bytes: pageBytes,
         endPageIndexExclusive: startPageIndex + 1,
       };
     }
