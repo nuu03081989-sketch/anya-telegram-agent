@@ -10,6 +10,7 @@ import {
   WARDROBE_MOODBOARD_SYSTEM_RULE,
 } from "@/app/lib/wardrobe-image-rules";
 import { researchModeLabel, researchSkill } from "@/app/skills/research";
+import { productFromPhotoSkill } from "@/app/skills/product-from-photo";
 
 export const runtime = "nodejs";
 
@@ -2474,6 +2475,33 @@ export async function POST(request: Request) {
 
       const base64Image = await downloadTelegramPhotoBase64(fileId);
 
+      const productPhotoContext = {
+        chatId,
+        text,
+        replyText: repliedText,
+        history,
+        imageBase64: base64Image,
+      };
+      const productPhotoMatch =
+        await productFromPhotoSkill.handler?.match(productPhotoContext);
+
+      if (productPhotoMatch?.matched && productFromPhotoSkill.handler) {
+        await sendTelegramMessage(
+          chatId,
+          "Распознаю товар и ищу, где его купить..."
+        );
+
+        const result =
+          await productFromPhotoSkill.handler.run(productPhotoContext);
+        const answer =
+          result.text ||
+          "Аня, товар распознал, но подходящих вариантов покупки сейчас не нашёл.";
+
+        await sendTelegramMessage(chatId, answer);
+        await saveExchange(chatId, text || "[Фото: поиск товара]", answer);
+        return Response.json({ ok: true, skill: "product-from-photo" });
+      }
+
       if (wantsSimilarImages(text)) {
         const images = await searchSimilarImages(base64Image);
         const sent = await sendImageResults(
@@ -2754,7 +2782,10 @@ export async function POST(request: Request) {
       message.includes("MODEL_TIMEOUT") ||
       message.includes("RESEARCH_SEARCH_TIMEOUT") ||
       message.includes("RESEARCH_PLAN_TIMEOUT") ||
-      message.includes("RESEARCH_MODEL_TIMEOUT")
+      message.includes("RESEARCH_MODEL_TIMEOUT") ||
+      message.includes("PRODUCT_PHOTO_IDENTIFY_TIMEOUT") ||
+      message.includes("PRODUCT_PHOTO_SEARCH_TIMEOUT") ||
+      message.includes("PRODUCT_PHOTO_MODEL_TIMEOUT")
     ) {
       await sendTelegramMessage(
         chatId,

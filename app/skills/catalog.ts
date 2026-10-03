@@ -1,3 +1,4 @@
+import { productFromPhotoSkill } from "./product-from-photo";
 import { researchSkill } from "./research";
 import { defineSkill } from "./types";
 
@@ -13,6 +14,7 @@ export const SKILLS = [
     dependencies: ["Yandex Search", "Telegram reply context"],
   }),
   researchSkill,
+  productFromPhotoSkill,
   defineSkill({
     id: "document-analysis",
     title: "Анализ документов",

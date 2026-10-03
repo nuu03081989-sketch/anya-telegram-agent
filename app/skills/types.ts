@@ -1,6 +1,7 @@
 export type SkillId =
   | "wardrobe"
   | "research"
+  | "product-from-photo"
   | "document-analysis"
   | "expense-control"
   | "navigation"
@@ -29,6 +30,7 @@ export type SkillContext = {
   text: string;
   replyText?: string;
   history?: readonly SkillMessage[];
+  imageBase64?: string;
 };
 
 export type SkillMatch = {
