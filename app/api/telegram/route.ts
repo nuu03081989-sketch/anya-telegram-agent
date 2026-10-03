@@ -1913,6 +1913,17 @@ export async function POST(request: Request) {
 
       try {
         const bytes = await downloadTelegramFile(document.file_id);
+
+        if (
+          (mimeType === "application/pdf" || /\.pdf$/i.test(fileName)) &&
+          bytes.length > 10 * 1024 * 1024
+        ) {
+          await sendTelegramMessage(
+            chatId,
+            "Аня, PDF больше лимита одного OCR-запроса. Сам разбиваю его по страницам и читаю частями..."
+          );
+        }
+
         const documentContext = {
           chatId,
           text,
@@ -1957,10 +1968,15 @@ export async function POST(request: Request) {
             chatId,
             "Аня, этот формат пока не читаю. Сейчас поддерживаю PDF, Word DOCX, Excel XLS/XLSX, CSV, TXT и Markdown."
           );
+        } else if (message.includes("OCR_SINGLE_PAGE_TOO_LARGE")) {
+          await sendTelegramMessage(
+            chatId,
+            "Аня, я попробовал автоматически разбить PDF, но внутри есть отдельная страница больше технического лимита OCR в 10 МБ. Простое деление по страницам тут уже не помогает. Следующий уровень решения - автоматически уменьшать такую страницу перед распознаванием."
+          );
         } else if (message.includes("OCR_FILE_TOO_LARGE")) {
           await sendTelegramMessage(
             chatId,
-            "Аня, этот сканированный PDF больше 10 МБ. Для OCR Yandex сейчас нужен файл до 10 МБ. Пришли более лёгкую версию или разбей PDF на части."
+            "Аня, автоматическое разбиение PDF не уложило одну из частей в лимит OCR. Файл не потерян, но этот случай нужно отдельно дожать сжатием страницы."
           );
         } else if (
           message.includes("OCR_NOT_CONFIGURED") ||

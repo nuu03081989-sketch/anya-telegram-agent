@@ -3,6 +3,10 @@ import type { SkillContext, SkillResult } from "./types";
 
 const YANDEX_API = "https://ai.api.cloud.yandex.net/v1/chat/completions";
 
+const OCR_MAX_PDF_BYTES = 10 * 1024 * 1024;
+const OCR_CHUNK_TARGET_BYTES = Math.floor(9.5 * 1024 * 1024);
+const OCR_MAX_PAGES_PER_REQUEST = 200;
+
 function cleanTelegramText(text: string) {
   return text
     .replace(/\*\*/g, "")
@@ -28,7 +32,7 @@ function extractOcrPageText(page: any) {
 }
 
 async function recognizePdfWithYandexOcr(bytes: Buffer) {
-  if (bytes.length > 10 * 1024 * 1024) {
+  if (bytes.length > OCR_MAX_PDF_BYTES) {
     throw new Error("OCR_FILE_TOO_LARGE");
   }
 
@@ -128,6 +132,134 @@ async function recognizePdfWithYandexOcr(bytes: Buffer) {
   throw new Error("OCR_TIMEOUT");
 }
 
+
+async function createPdfChunk(
+  sourcePdf: any,
+  startPageIndex: number,
+  endPageIndexExclusive: number
+) {
+  const { PDFDocument } = require("pdf-lib");
+  const chunkPdf = await PDFDocument.create();
+  const pageIndices = Array.from(
+    { length: endPageIndexExclusive - startPageIndex },
+    (_, offset) => startPageIndex + offset
+  );
+  const copiedPages = await chunkPdf.copyPages(sourcePdf, pageIndices);
+
+  for (const page of copiedPages) {
+    chunkPdf.addPage(page);
+  }
+
+  const saved = await chunkPdf.save({
+    useObjectStreams: true,
+    addDefaultPage: false,
+    objectsPerTick: 50,
+  });
+
+  return Buffer.from(saved);
+}
+
+async function splitPdfForYandexOcr(bytes: Buffer) {
+  const { PDFDocument } = require("pdf-lib");
+  const sourcePdf = await PDFDocument.load(bytes, {
+    ignoreEncryption: true,
+    updateMetadata: false,
+  });
+  const pageCount = sourcePdf.getPageCount();
+
+  if (pageCount < 1) {
+    throw new Error("DOCUMENT_HAS_NO_TEXT");
+  }
+
+  const chunks: Array<{
+    bytes: Buffer;
+    startPage: number;
+    endPage: number;
+  }> = [];
+
+  let startPageIndex = 0;
+
+  while (startPageIndex < pageCount) {
+    let low = startPageIndex + 1;
+    let high = Math.min(
+      pageCount,
+      startPageIndex + OCR_MAX_PAGES_PER_REQUEST
+    );
+    let best:
+      | {
+          bytes: Buffer;
+          endPageIndexExclusive: number;
+        }
+      | undefined;
+
+    while (low <= high) {
+      const mid = Math.floor((low + high) / 2);
+      const candidate = await createPdfChunk(
+        sourcePdf,
+        startPageIndex,
+        mid
+      );
+
+      if (candidate.length <= OCR_CHUNK_TARGET_BYTES) {
+        best = {
+          bytes: candidate,
+          endPageIndexExclusive: mid,
+        };
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+
+    if (!best) {
+      const singlePage = await createPdfChunk(
+        sourcePdf,
+        startPageIndex,
+        startPageIndex + 1
+      );
+
+      if (singlePage.length > OCR_MAX_PDF_BYTES) {
+        throw new Error("OCR_SINGLE_PAGE_TOO_LARGE");
+      }
+
+      best = {
+        bytes: singlePage,
+        endPageIndexExclusive: startPageIndex + 1,
+      };
+    }
+
+    chunks.push({
+      bytes: best.bytes,
+      startPage: startPageIndex + 1,
+      endPage: best.endPageIndexExclusive,
+    });
+    startPageIndex = best.endPageIndexExclusive;
+  }
+
+  return chunks;
+}
+
+async function recognizePdfPossiblyChunked(bytes: Buffer) {
+  if (bytes.length <= OCR_MAX_PDF_BYTES) {
+    return recognizePdfWithYandexOcr(bytes);
+  }
+
+  const chunks = await splitPdfForYandexOcr(bytes);
+  const recognizedChunks = await Promise.all(
+    chunks.map(async (chunk, index) => {
+      const text = await recognizePdfWithYandexOcr(chunk.bytes);
+      const pageLabel =
+        chunk.startPage === chunk.endPage
+          ? `Страница ${chunk.startPage}`
+          : `Страницы ${chunk.startPage}-${chunk.endPage}`;
+
+      return `[OCR часть ${index + 1}: ${pageLabel}]\n${text}`;
+    })
+  );
+
+  return recognizedChunks.join("\n\n");
+}
+
 async function extractDocumentText(
   fileName: string,
   mimeType: string,
@@ -181,7 +313,7 @@ async function extractDocumentText(
       return embeddedText;
     }
 
-    return recognizePdfWithYandexOcr(bytes);
+    return recognizePdfPossiblyChunked(bytes);
   }
 
   throw new Error("UNSUPPORTED_DOCUMENT");
